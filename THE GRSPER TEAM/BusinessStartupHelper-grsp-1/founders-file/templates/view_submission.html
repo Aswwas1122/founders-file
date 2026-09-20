@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#05060a">
+<title>{{ sub.caseName or 'Saved idea' }} — The Founder's File</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  /* This is a standalone, print-friendly read-only page (opened in a new
+     tab from "My saved ideas" → View), so it intentionally doesn't load
+     app.js/simulation.js/GraphViz — nothing on this page is interactive. */
+  body { padding: 40px 20px 80px; }
+  .view-wrap { max-width: 820px; margin: 0 auto; }
+  .view-header { margin-bottom: 28px; }
+  .view-header h1 { font-size: clamp(24px, 3.4vw, 32px); margin: 0 0 6px; font-weight: 700; color: #fff; }
+  .view-meta { color: var(--ink-soft); font-size: 13.5px; }
+  .view-idea { margin-top: 14px; color: var(--ink-soft); font-size: 14.5px; line-height: 1.6; white-space: pre-wrap; }
+  .view-section { margin-top: 30px; }
+  .view-section h2 { font-size: 16px; font-weight: 600; color: #fff; margin: 0 0 10px; }
+  .view-empty { color: var(--ink-soft); font-size: 13.5px; font-style: italic; }
+  .view-json {
+    background: #0b0d14; border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px; font-family: 'JetBrains Mono', monospace; font-size: 12.5px;
+    line-height: 1.55; color: #d6dae3; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  .view-actions { margin-top: 34px; display: flex; gap: 10px; }
+  @media print {
+    .view-actions { display: none; }
+    body { padding: 0; background: #fff; color: #000; }
+    .view-json { background: #f6f6f6; color: #000; border-color: #ccc; }
+  }
+</style>
+</head>
+<body>
+
+<div class="view-wrap">
+  <div class="view-header">
+    <h1>{{ sub.caseName or (sub.idea[:60] + ('…' if sub.idea|length > 60 else '')) }}</h1>
+    <div class="view-meta">
+      Saved {{ sub.updatedAt }}
+      {% if sub.budget %} · Budget: {{ sub.budget }}{% endif %}
+      {% if sub.location %} · {{ sub.location }}{% endif %}
+    </div>
+    <div class="view-idea">{{ sub.idea }}</div>
+  </div>
+
+  <div class="view-section">
+    <h2>Round 1 — Should I do this?</h2>
+    {% if sub.analyzeResult %}
+      <div class="view-json">{{ sub.analyzeResult | tojson(indent=2) }}</div>
+    {% else %}
+      <div class="view-empty">Not run for this idea.</div>
+    {% endif %}
+  </div>
+
+  <div class="view-section">
+    <h2>Round 2 — Business model &amp; simulation</h2>
+    {% if sub.modelResult %}
+      <div class="view-json">{{ sub.modelResult | tojson(indent=2) }}</div>
+    {% else %}
+      <div class="view-empty">Not run for this idea.</div>
+    {% endif %}
+  </div>
+
+  <div class="view-section">
+    <h2>Round 3 — Tax organizer</h2>
+    {% if sub.taxResult %}
+      <div class="view-json">{{ sub.taxResult | tojson(indent=2) }}</div>
+    {% else %}
+      <div class="view-empty">Not run for this idea.</div>
+    {% endif %}
+  </div>
+
+  <div class="view-actions">
+    <button class="ghost" onclick="window.print()">Print / Save as PDF</button>
+    <button class="ghost" onclick="window.close()">Close</button>
+  </div>
+</div>
+
+</body>
+</html>

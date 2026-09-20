@@ -1,0 +1,1590 @@
+let state = {
+  ideaName: '', ideaPrompt: '', ideaBudget: '', ideaLocation: '',
+  round1: null, round2: null, round3: null, user: null, submissionId: null,
+  pendingAction: null, // e.g. 'saveThenNew' — resumed once sign-in completes
+  vizResult: null,          // set by visualization.js on Confirm
+  vizInitialized: false,
+  vizInitializedFor: null,
+};
+const $ = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------------
+// Left-side step navigation. Step 0 (the idea) is always unlocked; steps 1-4
+// stay locked/grayed-out until Round 1 has a result. Once unlocked, the
+// remaining steps can be visited in any order.
+// ---------------------------------------------------------------------------
+
+function goToStep(round) {
+  // Step 0 (the idea) has no nav button and is always reachable. Any other
+  // step must have an unlocked nav button — this guards goToStep itself so
+  // a locked step can never be shown even if a future caller forgets to check.
+  const navEl = $('navStep' + round);
+  if (navEl && navEl.disabled) return;
+  document.querySelectorAll('.side-nav-item').forEach(n => n.classList.toggle('active', n.dataset.round === String(round)));
+  document.querySelectorAll('.round-page').forEach(p => p.style.display = 'none');
+  const page = $('round' + round);
+  if (page) page.style.display = 'block';
+
+  // The simulator lives inside Round 2's page and is hard-gated on Round 1
+  // having produced a result (it's seeded from that sentiment read).
+  if (String(round) === '2') {
+    const vizGate = $('vizGate');
+    const vizContainer = $('vizContainer');
+    if (vizGate && vizContainer) {
+      if (!state.round1) {
+        vizGate.style.display = 'block';
+        vizContainer.style.display = 'none';
+      } else {
+        vizGate.style.display = 'none';
+        vizContainer.style.display = 'block';
+        // Re-init whenever the round1 result object itself has changed since
+        // the last init, so rerunning Round 1 with a different idea doesn't
+        // leave the old idea's estimates on screen.
+        if (typeof vizInit === 'function' && (!state.vizInitialized || state.vizInitializedFor !== state.round1)) {
+          vizInit(vizContainer, state.ideaPrompt, state.round1);
+          state.vizInitialized = true;
+          state.vizInitializedFor = state.round1;
+        }
+      }
+    }
+  }
+
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function unlockSteps() {
+  ['navStep1', 'navStep2', 'navStep3'].forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    el.disabled = false;
+    el.classList.remove('locked');
+  });
+}
+
+function lockSteps() {
+  ['navStep1', 'navStep2', 'navStep3'].forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    el.disabled = true;
+    el.classList.add('locked');
+  });
+}
+
+document.querySelectorAll('.side-nav-item').forEach(item => {
+  item.addEventListener('click', () => {
+    if (item.disabled) return;
+    goToStep(item.dataset.round);
+  });
+});
+
+$('ideaName').addEventListener('input', (e) => { state.ideaName = e.target.value; });
+$('ideaBudget').addEventListener('input', (e) => { state.ideaBudget = e.target.value; });
+$('ideaLocation').addEventListener('input', (e) => { state.ideaLocation = e.target.value; });
+
+function loadingHTML(msg) {
+  return `<div class="loading-line"><span class="spinner"></span>${msg}</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Source citations: a small hover/click popover showing where a claim came
+// from. Backward-compatible with older saved data where claims were plain
+// strings (no source) rather than {claim, source} objects.
+// ---------------------------------------------------------------------------
+
+function normalizeClaim(item) {
+  if (item && typeof item === 'object') {
+    return { text: item.claim || '', source: item.source || null };
+  }
+  return { text: String(item || ''), source: null };
+}
+
+function claimMdLine(raw) {
+  const c = normalizeClaim(raw);
+  return c.source ? `- ${c.text} (source: ${c.source})` : `- ${c.text}`;
+}
+
+function citeButton(source, claimText = '') {
+  const has = !!source;
+  const label = has ? 'View source' : 'No specific source cited';
+  return `<button type="button" class="cite-btn${has ? '' : ' cite-btn-none'}" data-source="${escapeHTML(source || '')}" data-claim="${escapeHTML(claimText || '')}" aria-label="${label}" title="${label}">i</button>`;
+}
+
+let citeTooltipEl = null;
+function ensureCiteTooltip() {
+  if (citeTooltipEl) return citeTooltipEl;
+  citeTooltipEl = document.createElement('div');
+  citeTooltipEl.className = 'cite-tooltip';
+  citeTooltipEl.style.display = 'none';
+  document.body.appendChild(citeTooltipEl);
+  return citeTooltipEl;
+}
+
+function showCiteTooltip(btn) {
+  const tip = ensureCiteTooltip();
+  const source = btn.dataset.source;
+  const claim = btn.dataset.claim || '';
+  if (source) {
+    let host = source;
+    try { host = new URL(source).hostname.replace(/^www\./, ''); } catch (e) { /* keep raw */ }
+    const claimHtml = claim ? `<div class="cite-tooltip-claim" style="margin-bottom:8px;font-size:12px;font-style:italic;color:var(--ink-soft);">"${escapeHTML(claim)}"</div>` : '';
+    tip.innerHTML = `${claimHtml}<div class="cite-tooltip-label">Source</div><a href="${escapeHTML(source)}" target="_blank" rel="noopener noreferrer">${escapeHTML(host)} ↗</a>`;
+  } else {
+    const claimHtml = claim ? `<div class="cite-tooltip-claim" style="margin-bottom:8px;font-size:12px;font-style:italic;color:var(--ink-soft);">"${escapeHTML(claim)}"</div>` : '';
+    tip.innerHTML = `${claimHtml}<div class="cite-tooltip-label">Not independently sourced</div><div class="cite-tooltip-body">This is Claude's general reasoning, not a claim tied to a specific retrieved source.</div>`;
+  }
+  tip.style.display = 'block';
+  const rect = btn.getBoundingClientRect();
+  const tipRect = tip.getBoundingClientRect();
+  let left = rect.left + rect.width / 2 - tipRect.width / 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - tipRect.width - 8));
+  const top = rect.top - tipRect.height - 8;
+  tip.style.left = left + window.scrollX + 'px';
+  tip.style.top = (top < 0 ? rect.bottom + 8 : top) + window.scrollY + 'px';
+}
+
+function hideCiteTooltip() {
+  if (citeTooltipEl) citeTooltipEl.style.display = 'none';
+}
+
+document.addEventListener('mouseover', (e) => {
+  const btn = e.target.closest('.cite-btn');
+  if (btn) showCiteTooltip(btn);
+});
+document.addEventListener('mouseout', (e) => {
+  if (e.target.closest('.cite-btn')) hideCiteTooltip();
+});
+document.addEventListener('focusin', (e) => {
+  const btn = e.target.closest('.cite-btn');
+  if (btn) showCiteTooltip(btn);
+});
+document.addEventListener('focusout', (e) => {
+  if (e.target.closest('.cite-btn')) hideCiteTooltip();
+});
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.cite-btn');
+  if (btn) { e.preventDefault(); showCiteTooltip(btn); }
+  else if (!e.target.closest('.cite-tooltip')) hideCiteTooltip();
+});
+
+// CHANGE: was 65 / 40, which disagreed with the backend's verdict thresholds
+// — a 67 could render a green "positive" stamp beside the words "Promising,
+// validate more". Now matches scoring.py's score_to_verdict exactly
+// (68 / 45 / 25) — a single authoritative threshold set for both the stamp
+// color and the verdict text, since both come from the same score.
+function scoreStampClass(score) {
+  if (score >= 68) return 'pos';   // "Worth a pilot"
+  if (score >= 45) return 'mid';   // "Promising, validate more"
+  if (score >= 25) return 'mid';   // "Wait and validate more"
+  return '';                        // "Hard pass for now"
+}
+
+// ---------------------------------------------------------------------------
+// View-model builders (pure — no DOM access). These translate a raw
+// /api/analyze or /api/model response into a plain object the presentation
+// layer (round1HTML/renderRound2, using MAIN's own markup/CSS) consumes.
+// Keeping them DOM-free is what lets MAIN's markup diverge freely from
+// FEATURE's without protected-logic edits ever touching a document.* call.
+// ---------------------------------------------------------------------------
+
+function buildAnalyzeViewModel(r) {
+  const cls = scoreStampClass(r.score);
+  const b = r.scoreBreakdown || {};
+  const factors = b.factors || [];
+
+  const label = { demand: 'Demand', contestability: 'Contestability', timing: 'Timing' };
+  const note = {
+    demand: 'Does the market want this at all',
+    contestability: `Moat ${b.moatScore ?? '–'}/100 against competition ${b.competitionIntensity ?? '–'}/100`,
+    timing: 'Is now the moment to start',
+  };
+
+  const factorRows = factors.map(f => ({
+    factor: f.factor,
+    label: label[f.factor] || f.factor,
+    value: f.value,
+    weightPct: Math.round(f.weight * 100),
+    multiplier: f.multiplier,
+    measured: !!f.measured,
+    note: note[f.factor] || '',
+  }));
+
+  const confidencePct = b.confidence !== undefined ? Math.round(b.confidence * 100) : 100;
+  const reasons = [
+    ['Demand', b.demandScore, b.demandScoreReason],
+    ['Competition intensity', b.competitionIntensity, b.competitionIntensityReason],
+    ['Timing', b.timingScore, b.timingScoreReason],
+    ['Moat', b.moatScore, b.moatScoreReason],
+  ].filter(([, , reason]) => reason).map(([name, value, reason]) => ({ name, value, reason }));
+
+  return {
+    score: r.score,
+    stampClass: cls,
+    verdictText: r.verdict,
+    summary: r.summary,
+    hasFailureWarning: !!r._warning,
+    warningText: r._warning || null,
+    errorDetail: r._errorDetail || null,
+    evidenceItems: [
+      ...(r.positives || []).map(p => ({ kind: 'positive', tag: 'In favor', ...normalizeClaim(p) })),
+      ...(r.risks || []).map(p => ({ kind: 'risk', tag: 'Risk / open question', ...normalizeClaim(p) })),
+    ],
+    breakdown: {
+      compositeBeforeSharpening: b.compositeBeforeSharpening ?? null,
+      confidencePct,
+      finalScore: r.score,
+      factorRows,
+      reasons,
+    },
+  };
+}
+
+function buildBusinessModelViewModel(m) {
+  const allAmounts = [...(m.costBreakdown || []).map(x => x.amount), ...(m.revenueBreakdown || []).map(x => x.amount)];
+  const maxAmt = Math.max(1, ...allAmounts);
+
+  // PROTECTED (FEATURE): flow-bar width — each bar scaled relative to the max
+  // amount among all cost+revenue amounts combined, with a 4% floor so a tiny
+  // amount still renders a visible sliver.
+  const flowRow = (label, amount, kind) => ({
+    label,
+    amount,
+    formattedAmount: '$' + Number(amount).toLocaleString(),
+    barWidthPct: Math.max(4, (amount / maxAmt * 100)),
+    kind, // 'revenue' | 'cost'
+  });
+
+  const revenueRows = (m.revenueBreakdown || []).map(x => flowRow(x.label, x.amount, 'revenue'));
+  const costRows = (m.costBreakdown || []).map(x => flowRow(x.label, x.amount, 'cost'));
+
+  return {
+    customer: m.customer,
+    revenueModel: m.revenueModel,
+    valueProp: m.valueProp,
+    keyCosts: m.keyCosts || [],
+    flowRows: [...revenueRows, ...costRows],
+    totalStartupInvestment: Number(m.totalStartupInvestment || 0),
+    formattedTotalStartupInvestment: '$' + Number(m.totalStartupInvestment || 0).toLocaleString(),
+    firstMilestone: m.firstMilestone,
+  };
+}
+
+function escapeHTML(s) {
+  if (s === undefined || s === null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+async function getJSON(url) {
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+async function deleteJSON(url) {
+  const res = await fetch(url, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+// ---- STEP 0 / ROUND 1 (the required intake) ----
+$('runAnalysis').addEventListener('click', async () => {
+  const prompt = $('ideaPrompt').value.trim();
+  const budget = $('ideaBudget').value.trim();
+  const location = $('ideaLocation').value.trim();
+
+  if (!prompt) { $('ideaPrompt').focus(); return; }
+  if (!budget) { $('ideaBudget').focus(); return; }
+  if (!location) { $('ideaLocation').focus(); return; }
+
+  state.ideaPrompt = prompt;
+  state.ideaBudget = budget;
+  state.ideaLocation = location;
+
+  $('analysisResult').innerHTML = '';
+  $('analysisDoneNote').style.display = 'none';
+  $('analysisLoading').style.display = 'block';
+  $('analysisLoading').innerHTML = loadingHTML('Reading the market for this idea…');
+  $('runAnalysis').disabled = true;
+
+  try {
+    const result = await postJSON('/api/analyze', { idea: prompt, budget, location });
+    state.round1 = result;
+    renderRound1(result);
+    unlockSteps();
+    $('analysisDoneNote').style.display = 'block';
+    goToStep(1);
+  } catch (err) {
+    $('analysisResult').innerHTML = `<div class="empty-note">The analysis didn't come back (${err.message}). Check that the backend is running and ANTHROPIC_API_KEY is set, then try again.</div>`;
+  } finally {
+    $('analysisLoading').style.display = 'none';
+    $('runAnalysis').disabled = false;
+  }
+});
+
+function animateCountUp(el, target, duration = 900) {
+  const start = performance.now();
+  function tick(now) {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+    el.textContent = Math.round(eased * target);
+    if (t < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+// Renders the score breakdown the backend already computes — the factors
+// MULTIPLY rather than average, so the display shows each factor's
+// multiplier and the pre-sharpening product, not "value x weight = points".
+function scoreBreakdownHTML(vm) {
+  const b = vm.breakdown;
+  if (!b.factorRows.length) return '';
+
+  const rows = b.factorRows.map(f => `
+    <li${f.measured ? '' : ' class="risk"'}>
+      <span class="tag">${escapeHTML(f.label)} — ${f.value}/100
+        · weight ${f.weightPct}% · ×${f.multiplier}${f.measured ? '' : ' · NOT MEASURED, held at neutral 50'}</span>
+      ${escapeHTML(f.note)}
+    </li>`).join('');
+
+  return `
+    <h3 style="font-size:14px;margin:22px 0 4px;">How this score was built</h3>
+    <p style="font-size:12.5px;color:var(--ink-soft);margin:0 0 10px;line-height:1.55;">
+      The three factors multiply rather than average, so a weak one can't be offset by
+      strong others. Product: <span class="mono">${b.compositeBeforeSharpening ?? '–'}</span>,
+      then spread toward the ends of the scale at ${b.confidencePct}% confidence to give
+      <span class="mono">${b.finalScore}</span>.
+    </p>
+    <ul class="evidence-list">${rows}</ul>
+    ${b.reasons.length ? `
+      <h3 style="font-size:14px;margin:22px 0 4px;">What each judgment was based on</h3>
+      <ul class="evidence-list">
+        ${b.reasons.map(rr => `<li><span class="tag">${escapeHTML(rr.name)} ${rr.value}/100</span>${escapeHTML(rr.reason)}</li>`).join('')}
+      </ul>` : ''}
+  `;
+}
+
+function round1HTML(r) {
+  const vm = buildAnalyzeViewModel(r);
+
+  let warningHTML = '';
+  if (vm.hasFailureWarning) {
+    console.error('Sentiment Score sub-call failures:', vm.errorDetail);
+    const detailLines = Object.entries(vm.errorDetail || {})
+      .map(([key, msg]) => `<li><code>${escapeHTML(key)}</code>: ${escapeHTML(msg)}</li>`)
+      .join('');
+    warningHTML = `
+      <div class="empty-note" style="border-color: var(--bad); color: var(--bad); margin-bottom: 18px;">
+        <strong>Heads up — this isn't a real read.</strong> ${escapeHTML(vm.warningText)}
+        ${detailLines ? `<ul style="margin:8px 0 0; padding-left:18px; font-size:12.5px;">${detailLines}</ul>` : ''}
+        <div style="margin-top:6px;">Full detail is also in the browser console (F12) and the server terminal.</div>
+      </div>`;
+  }
+
+  const evidence = vm.evidenceItems.map((item, i) =>
+    `<li style="animation-delay:${i * 60}ms" class="reveal-item${item.kind === 'risk' ? ' risk' : ''}"><span class="tag">${escapeHTML(item.tag)}</span>${escapeHTML(item.text)}${citeButton(item.source)}</li>`
+  ).join('');
+
+  return `
+    ${warningHTML}
+    <div class="verdict">
+      <div class="stamp ${vm.stampClass}">
+        <div class="score" id="scoreNum">0</div>
+        <div class="of100">OUT OF 100</div>
+      </div>
+      <div class="verdict-text">
+        <div class="call">${escapeHTML(vm.verdictText)}</div>
+        <p>${escapeHTML(vm.summary)}</p>
+      </div>
+    </div>
+    <ul class="evidence-list">
+      ${evidence}
+    </ul>
+    ${scoreBreakdownHTML(vm)}
+  `;
+}
+
+function renderRound1(r) {
+  $('round1Result').innerHTML = round1HTML(r);
+  animateCountUp($('scoreNum'), Number(r.score) || 0);
+  $('status1').classList.add('done');
+  updateExportVisibility();
+}
+
+// ---- ROUND 2 ----
+$('runModel').addEventListener('click', async () => {
+  const notes = $('r2notes').value.trim();
+  $('modelResult').innerHTML = '';
+  $('modelLoading').style.display = 'block';
+  $('modelLoading').innerHTML = loadingHTML('Sketching the model…');
+  $('runModel').disabled = true;
+
+  try {
+    const result = await postJSON('/api/model', {
+      idea: state.ideaPrompt || $('ideaName').value,
+      budget: state.ideaBudget,
+      location: state.ideaLocation,
+      round1: state.round1,
+      notes,
+    });
+    state.round2 = result;
+    renderRound2(result);
+  } catch (err) {
+    $('modelResult').innerHTML = `<div class="empty-note">The model didn't come back (${err.message}). Try again.</div>`;
+  } finally {
+    $('modelLoading').style.display = 'none';
+    $('runModel').disabled = false;
+  }
+});
+
+// PROTECTED (FEATURE): each bar's width is relative to the max amount among
+// ALL cost+revenue amounts combined (not just this one panel's own items),
+// with a floor so a small amount still renders a visible sliver. moneyPanel
+// keeps MAIN's own split in/out layout (presentation), but takes the
+// pre-computed, correctly-scaled width from the view-model's flowRows rather
+// than recomputing a panel-local max, which would silently violate that
+// protected scaling behavior.
+function moneyPanel(title, items, cls, totalLabel, flowRowsByLabel) {
+  const total = items.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+  const rows = items.map((x, i) => {
+    const fr = flowRowsByLabel.get(x.label) || { barWidthPct: 4, formattedAmount: '$' + Number(x.amount || 0).toLocaleString() };
+    return `
+    <div class="flow-row reveal-item" style="animation-delay:${i * 50}ms">
+      <div class="flow-row-top">
+        <span class="flow-label">${escapeHTML(x.label)}</span>
+        <span class="flow-amount mono">${fr.formattedAmount}</span>
+      </div>
+      <div class="flow-bar-track"><div class="flow-bar-fill ${cls}" style="width:${fr.barWidthPct}%"></div></div>
+    </div>`;
+  }).join('');
+  return `
+    <div class="money-panel ${cls}-panel">
+      <h4>${title}</h4>
+      ${rows || '<div class="empty-note" style="padding:10px 0;">Nothing listed</div>'}
+      <div class="money-panel-total"><span>${totalLabel}</span><span class="mono">$${total.toLocaleString()}</span></div>
+    </div>`;
+}
+
+function renderRound2(m) {
+  const vm = buildBusinessModelViewModel(m);
+  const flowRowsByLabel = new Map(vm.flowRows.map(fr => [fr.label, fr]));
+
+  $('modelResult').innerHTML = `
+    <div class="model-grid">
+      <div class="model-card reveal-item" style="animation-delay:0ms"><h3>Customer</h3><p style="font-size:13.5px;line-height:1.55;margin:0;">${escapeHTML(vm.customer)}</p></div>
+      <div class="model-card reveal-item" style="animation-delay:80ms"><h3>Revenue model</h3><p style="font-size:13.5px;line-height:1.55;margin:0;">${escapeHTML(vm.revenueModel)}</p></div>
+      <div class="model-card reveal-item" style="grid-column: 1 / -1; animation-delay:160ms"><h3>Why they choose this</h3><p style="font-size:13.5px;line-height:1.55;margin:0;">${escapeHTML(vm.valueProp)}</p></div>
+    </div>
+
+    <h3 style="font-size:14px;margin:22px 0 12px;">Where the money goes in — and out</h3>
+    <div class="money-flow-split reveal-item" style="animation-delay:220ms">
+      ${moneyPanel('Money in — revenue', m.revenueBreakdown || [], 'in', 'Total projected revenue', flowRowsByLabel)}
+      ${moneyPanel('Money out — startup costs', m.costBreakdown || [], 'out', 'Total to launch', flowRowsByLabel)}
+    </div>
+    <div class="money-flow-net">
+      <span>Total to launch</span>
+      <span class="mono">${vm.formattedTotalStartupInvestment}</span>
+    </div>
+
+    <div class="field" style="margin-top:20px;">
+      <label>First milestone</label>
+      <p style="font-size:13.5px;line-height:1.55;color:var(--ink-soft);margin:0;">${escapeHTML(vm.firstMilestone)}</p>
+    </div>
+  `;
+  $('status2').classList.add('done');
+  updateExportVisibility();
+}
+
+// ---- ROUND 3 (optional — can be run with or without Round 2) ----
+$('mockExtensionBtn').addEventListener('click', () => {
+  const mockData = "Macbook Pro $2100\nAWS Hosting $120\nFacebook Ads $350\nBusiness cards $45\nCoffee with client $25\nDomain name $12\nCanva Pro subscription $15";
+  $('r3expenses').value = mockData;
+});
+
+if ($('useSimInTaxBtn')) {
+  $('useSimInTaxBtn').addEventListener('click', () => {
+    const v = state.vizResult;
+    if (!v) {
+      alert('Confirm a simulation in Round 2 first, then come back and use its numbers here.');
+      return;
+    }
+    const sim = v.simulation || {};
+    const lines = [];
+    lines.push(`Sector: ${v.sector || 'not set'}`);
+    lines.push(`One-time startup cost: $${Math.round(Number(v.inputs?.oneTimeStartupCost) || 0).toLocaleString()}`);
+    lines.push(`Monthly fixed expenses: $${Math.round(Number(v.inputs?.fixedExpensesMonthly) || 0).toLocaleString()}`);
+    lines.push(`Monthly variable expenses: $${Math.round(Number(v.inputs?.variableExpensesMonthly) || 0).toLocaleString()}`);
+    lines.push(`Estimated effective tax rate: ${v.inputs?.estimatedTaxRatePct ?? 'not set'}%`);
+    (v.inputs?.revenueStreams || []).forEach(s => {
+      lines.push(`Revenue stream — ${s.name}: $${Math.round(Number(s.monthlyAmount) || 0).toLocaleString()}/mo, ${s.growthRatePct}% growth${s.reinvest ? '' : ' (paid out personally)'}`);
+    });
+    if (sim.months && sim.months[0]) {
+      lines.push(`Projected month 1 revenue: $${Math.round(Number(sim.months[0].revenue) || 0).toLocaleString()}`);
+    }
+    if (sim.breakEvenMonth) lines.push(`Projected break-even: month ${sim.breakEvenMonth}`);
+    if (v.loan && v.loan.amount) {
+      lines.push(`Loan: $${Math.round(Number(v.loan.amount) || 0).toLocaleString()} ${v.loan.type} @ ${v.loan.interestRatePct}% over ${v.loan.termMonths} months`);
+    }
+    $('r3expenses').value = ($('r3expenses').value ? $('r3expenses').value + '\n\n' : '') + 'From the simulator:\n' + lines.join('\n');
+  });
+}
+
+// Tax year selector: current year + next year, since a founder planning
+// ahead usually wants to plan for either "this year" or "next year".
+if ($('r3taxYear')) {
+  const thisYear = new Date().getFullYear();
+  $('r3taxYear').innerHTML = [thisYear, thisYear + 1]
+    .map(y => `<option value="${y}">${y}</option>`).join('');
+}
+
+// Hiring toggle: "No" is the default; "Yes" reveals headcount/salary fields.
+let r3Hiring = { willHire: false, employeeCount: null, avgSalary: null };
+if ($('r3HireNoBtn') && $('r3HireYesBtn')) {
+  const setHireMode = (willHire) => {
+    r3Hiring.willHire = willHire;
+    $('r3HireNoBtn').classList.toggle('active', !willHire);
+    $('r3HireYesBtn').classList.toggle('active', willHire);
+    $('r3HiringDetails').style.display = willHire ? 'flex' : 'none';
+  };
+  $('r3HireNoBtn').addEventListener('click', () => setHireMode(false));
+  $('r3HireYesBtn').addEventListener('click', () => setHireMode(true));
+  $('r3HireCount').addEventListener('input', (e) => { r3Hiring.employeeCount = Number(e.target.value) || null; });
+  $('r3HireSalary').addEventListener('input', (e) => { r3Hiring.avgSalary = Number(e.target.value) || null; });
+}
+
+$('runTax').addEventListener('click', async () => {
+  $('taxResult').innerHTML = '';
+  $('taxLoading').style.display = 'block';
+  $('taxLoading').innerHTML = loadingHTML('Mapping this to Schedule C…');
+  $('runTax').disabled = true;
+
+  try {
+    const result = await postJSON('/api/tax', {
+      idea: state.ideaPrompt || $('ideaName').value,
+      budget: state.ideaBudget,
+      location: state.ideaLocation,
+      round2: state.round2,
+      expenses: $('r3expenses').value.trim(),
+      taxYear: $('r3taxYear') ? $('r3taxYear').value : null,
+      hiring: r3Hiring,
+    });
+    state.round3 = result;
+    renderRound3(result);
+  } catch (err) {
+    $('taxResult').innerHTML = `<div class="empty-note">The organizer didn't come back (${err.message}). Try again.</div>`;
+  } finally {
+    $('taxLoading').style.display = 'none';
+    $('runTax').disabled = false;
+  }
+});
+
+const ACCOUNTING_FIRMS = [
+  { name: 'Bench', desc: 'Bookkeeping built for small businesses and freelancers, with optional tax filing add-on.' },
+  { name: 'Block Advisors (H&R Block)', desc: 'Small-business-focused tax pros, in-person or virtual, comfortable with first-time Schedule C filers.' },
+  { name: 'A local CPA who works with sole proprietors', desc: 'Often the best value once revenue is real — ask other small business owners in your area for a referral.' },
+];
+
+// ---------------------------------------------------------------------------
+// Round 3 rendering helpers
+// ---------------------------------------------------------------------------
+
+function band(obj) {
+  // Backward-compatible: older saved data may have a plain number instead
+  // of a {low, mid, high} band.
+  if (obj && typeof obj === 'object' && 'mid' in obj) {
+    return { low: Number(obj.low) || 0, mid: Number(obj.mid) || 0, high: Number(obj.high) || 0 };
+  }
+  const v = Number(obj) || 0;
+  return { low: v, mid: v, high: v };
+}
+
+function bandHTML(b, prefix = '') {
+  if (b.low === b.mid && b.mid === b.high) return `<span class="mono">${prefix}$${b.mid.toLocaleString()}</span>`;
+  return `<span class="mono band-value">${prefix}$${b.low.toLocaleString()} <span class="band-sep">–</span> $${b.high.toLocaleString()} <span class="band-mid">(mid $${b.mid.toLocaleString()})</span></span>`;
+}
+
+function netProfitClass(mid) {
+  if (mid > 0) return 'good';
+  if (mid === 0) return 'warn';
+  return 'bad';
+}
+
+let r3ExpensesExpanded = false;
+let r3ActiveQuarter = 0;
+
+function taxNumbersBarChart(income, expenses, net) {
+  const maxVal = Math.max(1, income.mid, expenses.mid, Math.abs(net.mid));
+  const rows = [
+    { label: 'Income', val: income.mid, cls: 'in' },
+    { label: 'Expenses', val: expenses.mid, cls: 'out' },
+    { label: 'Net', val: net.mid, cls: net.mid >= 0 ? 'in' : 'bad' },
+  ];
+  return `
+    <div class="tax-bar-chart">
+      ${rows.map(r => `
+        <div class="tax-bar-row">
+          <span class="tax-bar-label">${r.label}</span>
+          <div class="tax-bar-track"><div class="tax-bar-fill ${r.cls}" style="width:${Math.max(3, Math.min(100, Math.abs(r.val) / maxVal * 100))}%"></div></div>
+          <span class="tax-bar-value mono">$${Math.round(r.val).toLocaleString()}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderQuarterlyPlanner(qp) {
+  if (!qp || !qp.quarters || !qp.quarters.length) return '';
+  if (r3ActiveQuarter >= qp.quarters.length) r3ActiveQuarter = 0;
+  const q = qp.quarters[r3ActiveQuarter];
+
+  const tabs = qp.quarters.map((quarter, i) => `
+    <button type="button" class="quarter-tab ${i === r3ActiveQuarter ? 'active' : ''}" data-qi="${i}">${escapeHTML(quarter.label || ('Q' + (i + 1)))}</button>
+  `).join('');
+
+  return `
+    <div class="quarterly-planner">
+      <div class="quarterly-planner-head">
+        <span>Quarterly tax planner${qp.taxYear ? ' — ' + escapeHTML(qp.taxYear) : ''}</span>
+        <div class="quarter-tabs">${tabs}</div>
+      </div>
+      <div class="quarterly-planner-body">
+        <div class="quarterly-stat-row">
+          <div class="quarterly-stat"><span class="quarterly-stat-label">Estimated income</span>${bandHTML(band(q.estimatedIncome))}</div>
+          <div class="quarterly-stat"><span class="quarterly-stat-label">Estimated expenses</span>${bandHTML(band(q.estimatedExpenses))}</div>
+          <div class="quarterly-stat"><span class="quarterly-stat-label">Est. quarterly tax due</span>${bandHTML(band(q.estimatedQuarterlyTaxDue))}</div>
+        </div>
+        ${q.note ? `<p class="quarterly-note">${escapeHTML(q.note)}</p>` : ''}
+      </div>
+      ${qp.hiringImpact ? `<div class="quarterly-hiring-impact"><span class="tag">Hiring impact</span>${escapeHTML(qp.hiringImpact)}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderRound3(t) {
+  const income = band(t.projectedScheduleC && t.projectedScheduleC.estimatedIncome);
+  const expenses = band(t.projectedScheduleC && t.projectedScheduleC.totalExpenses);
+  const net = band(t.projectedScheduleC && t.projectedScheduleC.netProfit);
+  const netCls = netProfitClass(net.mid);
+  const allExpenses = (t.projectedScheduleC && t.projectedScheduleC.categorizedExpenses) || [];
+  const visibleExpenses = r3ExpensesExpanded ? allExpenses : allExpenses.slice(0, 5);
+
+  let html = `<div class="tax-cards">`;
+
+  // ---- Card: Your Numbers ----
+  html += `
+    <div class="tax-card reveal-item">
+      <div class="tax-card-head"><span class="tax-card-icon">📊</span><h3>Your numbers</h3></div>
+      ${taxNumbersBarChart(income, expenses, net)}
+      <div class="tax-numbers-summary">
+        <div class="tax-numbers-row"><span>Estimated gross income</span>${bandHTML(income)}</div>
+        <div class="tax-numbers-row"><span>Total deductible expenses</span>${bandHTML(expenses, '-')}</div>
+        <div class="tax-numbers-row tax-numbers-net ${netCls}"><span>Estimated net profit</span>${bandHTML(net)}</div>
+      </div>
+      ${allExpenses.length ? `
+        <h4 class="tax-subhead">Categorized expenses</h4>
+        <table class="deduction-table">
+          <thead><tr><th>Item</th><th>Line</th><th>Category</th><th style="text-align:right;">Amount</th></tr></thead>
+          <tbody>${visibleExpenses.map(d => `<tr><td>${escapeHTML(d.item)}</td><td class="line">${escapeHTML(d.scheduleCLine)}</td><td>${escapeHTML(d.category)}</td><td style="text-align:right;" class="mono">$${Number(d.amount).toLocaleString()}</td></tr>`).join('')}</tbody>
+        </table>
+        ${allExpenses.length > 5 ? `<button type="button" class="ghost tax-expand-btn" id="r3ExpandExpensesBtn">${r3ExpensesExpanded ? 'Show top 5 only' : `Show all ${allExpenses.length} expense line items`}</button>` : ''}
+      ` : ''}
+      ${renderQuarterlyPlanner(t.quarterlyPlanner)}
+      ${t.quarterlyNote ? `<p class="tax-note">${escapeHTML(t.quarterlyNote)}</p>` : ''}
+    </div>
+  `;
+
+  // ---- Card: Strategies ----
+  if ((t.taxStrategies && t.taxStrategies.length) || t.recordkeeping) {
+    html += `
+      <div class="tax-card reveal-item">
+        <div class="tax-card-head"><span class="tax-card-icon">💡</span><h3>Strategies</h3></div>
+        ${t.taxStrategies && t.taxStrategies.length ? `
+          <h4 class="tax-subhead">Tax strategies &amp; tips</h4>
+          <ul class="checklist">${t.taxStrategies.map((raw, i) => { const s = normalizeClaim(raw); return `<li class="checklist-item"><label><input type="checkbox" data-checklist-id="strategy-${i}" /><span>${escapeHTML(s.text)}</span></label>${citeButton(s.source, s.text)}</li>`; }).join('')}</ul>
+        ` : ''}
+        ${t.recordkeeping && t.recordkeeping.length ? `
+          <h4 class="tax-subhead">Recordkeeping habits to start now</h4>
+          <ul class="checklist">${t.recordkeeping.map((r, i) => `<li class="checklist-item"><label><input type="checkbox" data-checklist-id="record-${i}" /><span>${escapeHTML(r)}</span></label></li>`).join('')}</ul>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  // ---- Card: Structure ----
+  html += `
+    <div class="tax-card reveal-item">
+      <div class="tax-card-head"><span class="tax-card-icon">🏛️</span><h3>Structure</h3></div>
+      ${t.structureNote ? `<p class="tax-note">${escapeHTML(t.structureNote)}</p>` : ''}
+      ${t.recommendedStructure ? `
+        <div class="structure-rec">
+          <label>Recommended registration for this business</label>
+          <div class="structure-rec-entity">${escapeHTML(t.recommendedStructure.entity)}</div>
+          <p class="tax-note" style="margin:6px 0 0;">${escapeHTML(t.recommendedStructure.reasoning)}</p>
+          <p class="tax-note-dim"><em>When to revisit:</em> ${escapeHTML(t.recommendedStructure.whenToRevisit)}</p>
+        </div>
+      ` : ''}
+      ${t.stateRecommendation ? `
+        <div class="structure-rec state-rec">
+          <label>Which state to form in</label>
+          <div class="structure-rec-entity">${escapeHTML(t.stateRecommendation.state)}${citeButton(t.stateRecommendation.source, t.stateRecommendation.reasoning)}</div>
+          <p class="tax-note" style="margin:6px 0 0;">${escapeHTML(t.stateRecommendation.reasoning)}</p>
+        </div>
+      ` : ''}
+    </div>
+  `;
+
+  // ---- Card: Next Steps ----
+  html += `
+    <div class="tax-card reveal-item">
+      <div class="tax-card-head"><span class="tax-card-icon">✅</span><h3>Next steps</h3></div>
+      ${t.whenToHireAccountant ? `<div class="field"><label>When to bring in a real accountant</label><p class="tax-note">${escapeHTML(t.whenToHireAccountant)}</p></div>` : ''}
+      <h4 class="tax-subhead">Firms that work with small businesses</h4>
+      ${ACCOUNTING_FIRMS.map(f => `<div class="firm-card"><div class="name">${escapeHTML(f.name)}</div><div class="desc">${escapeHTML(f.desc)}</div></div>`).join('')}
+    </div>
+  `;
+
+  html += `</div>`; // .tax-cards
+
+  $('taxResult').innerHTML = html;
+
+  if ($('r3ExpandExpensesBtn')) {
+    $('r3ExpandExpensesBtn').addEventListener('click', () => {
+      r3ExpensesExpanded = !r3ExpensesExpanded;
+      renderRound3(t);
+    });
+  }
+  document.querySelectorAll('.quarter-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      r3ActiveQuarter = Number(btn.dataset.qi);
+      renderRound3(t);
+    });
+  });
+
+  $('status3').classList.add('done');
+  updateExportVisibility();
+}
+
+function updateExportVisibility() {
+  const hasRounds = state.round1 || state.round2 || state.round3;
+  $('exportBtn').style.display = hasRounds ? 'inline-block' : 'none';
+  $('saveToAccountBtn').style.display = hasRounds ? 'inline-block' : 'none';
+}
+
+// ---- export ----
+$('exportBtn').addEventListener('click', () => {
+  const name = state.ideaName || $('ideaName').value || 'Untitled venture';
+  let md = `# ${name}\n\n`;
+  if (state.round1) {
+    md += `## Round 1 — Should I do this?\n\n**Idea:** ${state.ideaPrompt}\n\n**Score:** ${state.round1.score}/100 — ${state.round1.verdict}\n\n${state.round1.summary}\n\n**In favor:**\n${(state.round1.positives || []).map(claimMdLine).join('\n')}\n\n**Risks:**\n${(state.round1.risks || []).map(claimMdLine).join('\n')}\n\n`;
+  }
+  if (state.round2) {
+    md += `## Round 2 — Business model\n\n**Customer:** ${state.round2.customer}\n\n**Revenue model:** ${state.round2.revenueModel}\n\n**Value proposition:** ${state.round2.valueProp}\n\n**Startup investment total:** $${Number(state.round2.totalStartupInvestment || 0).toLocaleString()}\n\n**First milestone:** ${state.round2.firstMilestone}\n\n`;
+  }
+  if (state.round3) {
+    md += `## Round 3 — Tax & finance\n\n${state.round3.structureNote}\n\n`;
+    if (state.round3.projectedScheduleC) {
+      md += `**Projected Schedule C:**\n- Gross Income: $${band(state.round3.projectedScheduleC.estimatedIncome).mid.toLocaleString()}\n- Total Expenses: $${band(state.round3.projectedScheduleC.totalExpenses).mid.toLocaleString()}\n- Net Profit: $${band(state.round3.projectedScheduleC.netProfit).mid.toLocaleString()}\n\n`;
+      if (state.round3.projectedScheduleC.categorizedExpenses) {
+        md += `**Categorized Expenses:**\n${state.round3.projectedScheduleC.categorizedExpenses.map(d => `- ${d.item} ($${d.amount}) — ${d.scheduleCLine}: ${d.category}`).join('\n')}\n\n`;
+      }
+    }
+    if (state.round3.taxStrategies) {
+      md += `**Tax Strategies:**\n${state.round3.taxStrategies.map(claimMdLine).join('\n')}\n\n`;
+    }
+    md += `${state.round3.quarterlyNote}\n\n**When to hire an accountant:** ${state.round3.whenToHireAccountant}\n\n`;
+  }
+  md += `\n---\n*Generated by The Founder's File. Not financial, legal, or tax advice — verify specifics with a CPA.*\n`;
+
+  const blob = new Blob([md], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'founders-file') + '.md';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------------------------------------------------------------------
+// Accounts: signup / login / logout / session check
+// ---------------------------------------------------------------------------
+
+let authMode = 'signup';
+
+// ---------------------------------------------------------------------------
+// Page flow: landing → auth page → app shell.
+// Signed-out visitors always see the landing page first (never the app
+// shell), and land on the auth page only after clicking "Get started" or
+// one of the account-rail buttons.
+// ---------------------------------------------------------------------------
+
+function showLanding() {
+  $('landingPage').style.display = 'flex';
+  $('authPage').style.display = 'none';
+  $('appShell').style.display = 'none';
+}
+
+function showAuthPage(mode) {
+  authMode = mode;
+  $('landingPage').style.display = 'none';
+  $('appShell').style.display = 'none';
+  $('authPage').style.display = 'flex';
+  $('authError').style.display = 'none';
+  $('authEmail').value = '';
+  $('authPassword').value = '';
+  $('authPageTitle').textContent = mode === 'signup' ? 'Create your account' : 'Log in';
+  $('authSubmit').querySelector('span').textContent = mode === 'signup' ? 'Create account' : 'Log in';
+  $('authPassword').autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
+  $('authSwitchToLogin').style.display = mode === 'signup' ? 'inline' : 'none';
+  $('authSwitchToSignup').style.display = mode === 'login' ? 'inline' : 'none';
+}
+
+function showAppShell() {
+  $('landingPage').style.display = 'none';
+  $('authPage').style.display = 'none';
+  $('appShell').style.display = 'flex';
+}
+
+function updateAccountUI() {
+  const signedIn = !!state.user;
+  $('accountSignedOut').style.display = signedIn ? 'none' : 'flex';
+  $('accountSignedIn').style.display = signedIn ? 'flex' : 'none';
+  if (signedIn) {
+    $('accountEmail').textContent = state.user.email;
+    $('accountAvatar').textContent = (state.user.email || '?').charAt(0).toUpperCase();
+  }
+
+  if (signedIn) {
+    showAppShell();
+  } else {
+    // Only bounce back to the landing page if we're not already sitting on
+    // the auth page (e.g. after a failed login, don't yank the form away).
+    if ($('authPage').style.display !== 'flex') showLanding();
+  }
+
+  updateExportVisibility();
+
+  if (signedIn && state.user.hasOnboarded === false) {
+    showOnboarding();
+  }
+
+  // Resume whatever the user was trying to do before they were sent to sign in,
+  // so "Save & start new" (or plain "Save") doesn't silently drop their intent.
+  if (signedIn && state.pendingAction) {
+    const action = state.pendingAction;
+    state.pendingAction = null;
+    if (action === 'saveThenNew') saveThenNewIdea();
+    else if (action === 'saveToAccount') saveToAccount();
+  }
+}
+
+async function checkSession() {
+  try {
+    const data = await getJSON('/api/me');
+    state.user = data.user;
+  } catch (err) {
+    state.user = null;
+  }
+  updateAccountUI();
+}
+
+async function checkAuthProviders() {
+  try {
+    const data = await getJSON('/api/auth-providers');
+    if (data.google && $('googleLoginBtn')) $('googleLoginBtn').style.display = 'flex';
+  } catch (err) { /* leave Google button hidden */ }
+}
+checkAuthProviders();
+
+// ---- Onboarding (first sign-in only) ----
+const ONBOARDING_STEPS = [
+  { title: 'Welcome to The Founder\'s File', body: 'Three rounds turn a raw idea into a business case: a sentiment read, a business model, and a tax organizer — each grounded in real, cited sources where it matters.' },
+  { title: 'Round 1 → Round 3, in order', body: 'Each round builds on the last. You can skip ahead, but the results are sharper when Claude has your Round 1 and 2 answers to work from.' },
+  { title: 'Try the Simulator', body: 'The Simulator tab is pure math, no AI — play with your own revenue streams and see capital vs. personal income over time, without spending an API call.' },
+];
+let onboardingStep = 0;
+
+function ensureOnboardingModal() {
+  if ($('onboardingModal')) return;
+  const el = document.createElement('div');
+  el.className = 'modal-overlay';
+  el.id = 'onboardingModal';
+  el.style.display = 'none';
+  el.innerHTML = `
+    <div class="modal">
+      <h3 id="onboardingTitle" style="margin:0 0 10px;font-size:19px;"></h3>
+      <p id="onboardingBody" style="color:var(--ink-soft);font-size:14px;line-height:1.6;margin:0 0 18px;"></p>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div id="onboardingDots" style="display:flex;gap:6px;"></div>
+        <div style="display:flex;gap:8px;">
+          <button class="ghost" id="onboardingSkip" type="button">Skip</button>
+          <button class="primary" id="onboardingNext" type="button"><span>Next</span></button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(el);
+
+  $('onboardingSkip').addEventListener('click', finishOnboarding);
+  $('onboardingNext').addEventListener('click', () => {
+    onboardingStep++;
+    if (onboardingStep >= ONBOARDING_STEPS.length) finishOnboarding();
+    else renderOnboardingStep();
+  });
+}
+
+function renderOnboardingStep() {
+  const step = ONBOARDING_STEPS[onboardingStep];
+  $('onboardingTitle').textContent = step.title;
+  $('onboardingBody').textContent = step.body;
+  $('onboardingNext').querySelector('span').textContent = onboardingStep === ONBOARDING_STEPS.length - 1 ? 'Get started' : 'Next';
+  $('onboardingDots').innerHTML = ONBOARDING_STEPS.map((_, i) => `<span style="width:6px;height:6px;border-radius:50%;background:${i === onboardingStep ? 'var(--accent)' : 'var(--line)'};display:inline-block;"></span>`).join('');
+}
+
+function showOnboarding() {
+  ensureOnboardingModal();
+  onboardingStep = 0;
+  renderOnboardingStep();
+  $('onboardingModal').style.display = 'flex';
+}
+
+async function finishOnboarding() {
+  $('onboardingModal').style.display = 'none';
+  if (state.user) state.user.hasOnboarded = true;
+  try { await postJSON('/api/onboarding-complete', {}); } catch (err) { /* non-critical */ }
+}
+
+$('landingGetStarted1').addEventListener('click', () => showAuthPage('signup'));
+$('landingGetStarted2').addEventListener('click', () => showAuthPage('signup'));
+$('landingLoginBtn').addEventListener('click', () => showAuthPage('login'));
+$('openSignup').addEventListener('click', () => showAuthPage('signup'));
+$('openLogin').addEventListener('click', () => showAuthPage('login'));
+$('authBackToLanding').addEventListener('click', () => showLanding());
+$('switchToLoginLink').addEventListener('click', (e) => { e.preventDefault(); showAuthPage('login'); });
+$('switchToSignupLink').addEventListener('click', (e) => { e.preventDefault(); showAuthPage('signup'); });
+
+$('authSubmit').addEventListener('click', async () => {
+  const email = $('authEmail').value.trim();
+  const password = $('authPassword').value;
+  $('authError').style.display = 'none';
+  $('authSubmit').disabled = true;
+
+  try {
+    const url = authMode === 'signup' ? '/api/signup' : '/api/login';
+    const data = await postJSON(url, { email, password });
+    state.user = data;
+    updateAccountUI();
+  } catch (err) {
+    $('authError').textContent = err.message;
+    $('authError').style.display = 'block';
+  } finally {
+    $('authSubmit').disabled = false;
+  }
+});
+
+$('logoutBtn').addEventListener('click', async () => {
+  try { await postJSON('/api/logout', {}); } catch (err) { /* ignore */ }
+  state.user = null;
+  state.submissionId = null;
+  updateAccountUI();
+});
+
+// ---------------------------------------------------------------------------
+// Save to account / My saved ideas
+// ---------------------------------------------------------------------------
+
+async function saveCurrentIdea() {
+  const idea = state.ideaPrompt || $('ideaPrompt').value.trim() || $('ideaName').value.trim();
+  if (!idea) throw new Error('Nothing to save yet — describe the idea first.');
+
+  const payload = {
+    idea,
+    caseName: state.ideaName || $('ideaName').value.trim(),
+    budget: state.ideaBudget || $('ideaBudget').value.trim(),
+    location: state.ideaLocation || $('ideaLocation').value.trim(),
+    analyzeResult: state.round1,
+    modelResult: state.round2,
+    taxResult: state.round3,
+  };
+  if (state.submissionId) payload.id = state.submissionId;
+
+  const saved = await postJSON('/api/submissions', payload);
+  state.submissionId = saved.id;
+  return saved;
+}
+
+async function saveToAccount() {
+  $('saveToAccountBtn').disabled = true;
+  const originalText = $('saveToAccountBtn').textContent;
+  $('saveToAccountBtn').textContent = 'Saving…';
+
+  try {
+    await saveCurrentIdea();
+    $('saveToAccountBtn').textContent = 'Saved ✓';
+    setTimeout(() => { $('saveToAccountBtn').textContent = originalText; }, 1600);
+  } catch (err) {
+    $('saveToAccountBtn').textContent = originalText;
+    alert('Could not save: ' + err.message);
+  } finally {
+    $('saveToAccountBtn').disabled = false;
+  }
+}
+
+$('saveToAccountBtn').addEventListener('click', async () => {
+  if (!state.user) {
+    state.pendingAction = 'saveToAccount';
+    showAuthPage('signup');
+    return;
+  }
+  await saveToAccount();
+});
+
+// ---------------------------------------------------------------------------
+// New idea: clears everything to start over, prompting to save first if
+// there's unsaved work in progress.
+// ---------------------------------------------------------------------------
+
+function hasUnsavedWork() {
+  return !!(
+    $('ideaPrompt').value.trim() || $('ideaName').value.trim() ||
+    $('ideaBudget').value.trim() || $('ideaLocation').value.trim() ||
+    state.round1 || state.round2 || state.round3
+  );
+}
+
+function resetRound2Scratchpad() {
+  // Cushion fund and the Visualization simulator are free-standing inputs
+  // tied to whichever idea is currently open — they must not carry over to
+  // a new or different idea.
+  if ($('cushionFundAmount')) $('cushionFundAmount').value = '';
+  if ($('wizAssessResult')) $('wizAssessResult').innerHTML = '';
+  state.vizResult = null;
+  state.vizInitialized = false;
+  state.vizInitializedFor = null;
+  if ($('vizContainer')) $('vizContainer').innerHTML = '';
+}
+
+function resetIdeaState() {
+  state.ideaName = '';
+  state.ideaPrompt = '';
+  state.ideaBudget = '';
+  state.ideaLocation = '';
+  state.round1 = null;
+  state.round2 = null;
+  state.round3 = null;
+  state.submissionId = null;
+
+  $('ideaName').value = '';
+  $('ideaPrompt').value = '';
+  $('ideaBudget').value = '';
+  $('ideaLocation').value = '';
+  $('r2notes').value = '';
+  $('r3expenses').value = '';
+
+  $('analysisResult').innerHTML = '';
+  $('analysisDoneNote').style.display = 'none';
+  $('round1Result').innerHTML = '';
+  $('modelResult').innerHTML = '';
+  $('taxResult').innerHTML = '';
+  $('status1').classList.remove('done');
+  $('status2').classList.remove('done');
+  $('status3').classList.remove('done');
+
+  resetRound2Scratchpad();
+
+  lockSteps();
+  updateExportVisibility();
+  goToStep(0);
+}
+
+$('newIdeaBtn').addEventListener('click', () => {
+  if (!hasUnsavedWork()) { resetIdeaState(); return; }
+  $('newIdeaModal').style.display = 'flex';
+});
+
+$('cancelNewIdeaBtn').addEventListener('click', () => { $('newIdeaModal').style.display = 'none'; });
+$('newIdeaModal').addEventListener('click', (e) => { if (e.target.id === 'newIdeaModal') $('newIdeaModal').style.display = 'none'; });
+
+$('discardNewIdeaBtn').addEventListener('click', () => {
+  $('newIdeaModal').style.display = 'none';
+  resetIdeaState();
+});
+
+async function saveThenNewIdea() {
+  const btn = $('saveThenNewIdeaBtn');
+  btn.disabled = true;
+  try {
+    await saveCurrentIdea();
+    $('newIdeaModal').style.display = 'none';
+    resetIdeaState();
+  } catch (err) {
+    alert('Could not save: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('saveThenNewIdeaBtn').addEventListener('click', async () => {
+  if (!state.user) {
+    // Remember what the user was trying to do so it resumes automatically
+    // once they finish signing in, instead of silently dropping the action.
+    state.pendingAction = 'saveThenNew';
+    $('newIdeaModal').style.display = 'none';
+    showAuthPage('signup');
+    return;
+  }
+  await saveThenNewIdea();
+});
+
+$('openSaved').addEventListener('click', async () => {
+  $('savedModal').style.display = 'flex';
+  $('savedList').innerHTML = loadingHTML('Loading your saved ideas…');
+  try {
+    const res = await getJSON('/api/submissions');
+    // GET /api/submissions returns a paginated envelope
+    // ({items, total, page, pages}), not a bare array — added later for
+    // pagination without updating this call site, so every saved idea
+    // silently failed to appear (subs.length / subs.map on an object is
+    // undefined, which renderSavedList treated as "nothing saved").
+    // Array.isArray fallback keeps this working if the endpoint ever goes
+    // back to returning a plain array.
+    const subs = Array.isArray(res) ? res : (res.items || []);
+    renderSavedList(subs);
+  } catch (err) {
+    $('savedList').innerHTML = `<div class="empty-note small">Couldn't load your saved ideas (${escapeHTML(err.message)}).</div>`;
+  }
+});
+
+$('closeSavedModal').addEventListener('click', () => { $('savedModal').style.display = 'none'; });
+$('savedModal').addEventListener('click', (e) => { if (e.target.id === 'savedModal') $('savedModal').style.display = 'none'; });
+
+function renderSavedList(subs) {
+  if (!subs.length) {
+    $('savedList').innerHTML = '<div class="empty-note small">Nothing saved yet — run a round, then hit "Save this idea".</div>';
+    return;
+  }
+  $('savedList').innerHTML = subs.map(s => {
+    const date = new Date(s.updatedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    const rounds = [s.analyzeResult && 'R1', s.modelResult && 'R2', s.taxResult && 'R3'].filter(Boolean).join(', ') || 'no rounds run';
+    const label = s.caseName || s.idea.slice(0, 60) + (s.idea.length > 60 ? '…' : '');
+    return `
+      <div class="saved-item" data-id="${s.id}">
+        <div class="saved-info">
+          <div class="saved-name">${escapeHTML(label)}</div>
+          <div class="saved-meta">${date} · ${rounds}</div>
+        </div>
+        <div class="saved-actions">
+          <button class="ghost view-saved" data-id="${s.id}">View</button>
+          <button class="ghost load-saved" data-id="${s.id}">Open</button>
+          <button class="ghost delete-saved" data-id="${s.id}">Delete</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  document.querySelectorAll('.view-saved').forEach(btn => {
+    btn.addEventListener('click', () => {
+      window.open('/submissions/' + btn.dataset.id + '/view', '_blank');
+    });
+  });
+  document.querySelectorAll('.load-saved').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sub = subs.find(s => String(s.id) === btn.dataset.id);
+      if (sub) loadSubmission(sub);
+    });
+  });
+  document.querySelectorAll('.delete-saved').forEach(btn => {
+    btn.addEventListener('click', () => {
+      confirmDelete(btn.dataset.id, async () => {
+        await deleteJSON('/api/submissions/' + btn.dataset.id);
+        const remaining = subs.filter(s => String(s.id) !== btn.dataset.id);
+        renderSavedList(remaining);
+        if (state.submissionId === Number(btn.dataset.id)) state.submissionId = null;
+      });
+    });
+  });
+}
+
+$('deleteConfirmModal').addEventListener('click', (e) => { if (e.target.id === 'deleteConfirmModal') $('deleteConfirmModal').style.display = 'none'; });
+
+// Escape closes whichever modal is currently open. This only ever hides an
+// overlay (never triggers a confirm/delete action), so it's safe everywhere.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  document.querySelectorAll('.modal-overlay').forEach(m => {
+    if (getComputedStyle(m).display !== 'none') m.style.display = 'none';
+  });
+});
+
+function confirmDelete(id, onConfirm) {
+  $('deleteConfirmModal').style.display = 'flex';
+  // Strip any listener left over from a previous confirmDelete() call before
+  // attaching new ones, so two calls in a row can never both fire on one click.
+  let confirmBtn = $('confirmDeleteBtn');
+  let cancelBtn = $('cancelDeleteBtn');
+  confirmBtn.replaceWith(confirmBtn.cloneNode(true));
+  cancelBtn.replaceWith(cancelBtn.cloneNode(true));
+  confirmBtn = $('confirmDeleteBtn');
+  cancelBtn = $('cancelDeleteBtn');
+  const cleanup = () => {
+    $('deleteConfirmModal').style.display = 'none';
+  };
+  confirmBtn.addEventListener('click', async () => {
+    try {
+      await onConfirm();
+      cleanup();
+    } catch (err) {
+      alert('Could not delete: ' + err.message);
+      cleanup();
+    }
+  });
+  cancelBtn.addEventListener('click', cleanup);
+}
+
+function loadSubmission(sub) {
+  state.submissionId = sub.id;
+  state.ideaPrompt = sub.idea;
+  state.ideaBudget = sub.budget || '';
+  state.ideaLocation = sub.location || '';
+  state.round1 = sub.analyzeResult || null;
+  state.round2 = sub.modelResult || null;
+  state.round3 = sub.taxResult || null;
+
+  $('ideaPrompt').value = sub.idea;
+  $('ideaName').value = sub.caseName || sub.idea.slice(0, 60);
+  $('ideaBudget').value = sub.budget || '';
+  $('ideaLocation').value = sub.location || '';
+  state.ideaName = $('ideaName').value;
+
+  $('analysisResult').innerHTML = '';
+  $('analysisDoneNote').style.display = 'none';
+  $('round1Result').innerHTML = '';
+  $('modelResult').innerHTML = '';
+  $('taxResult').innerHTML = '';
+  $('status1').classList.remove('done');
+  $('status2').classList.remove('done');
+  $('status3').classList.remove('done');
+
+  resetRound2Scratchpad();
+
+  if (state.round1) {
+    renderRound1(state.round1);
+    unlockSteps();
+    $('analysisDoneNote').style.display = 'block';
+  } else {
+    lockSteps();
+  }
+  if (state.round2) renderRound2(state.round2);
+  if (state.round3) renderRound3(state.round3);
+
+  $('savedModal').style.display = 'none';
+  goToStep(state.round1 ? 1 : 0);
+}
+
+// ==================== CUSHION FUND WIZARD (modal, one question at a time) ====================
+function clampNum(raw, min, max, fallback) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function computeCushion() {
+  const savings = clampNum($('wizSavings').value, 0, 100_000_000, 0);
+  const loan = clampNum($('wizLoan').value, 0, 100_000_000, 0);
+  const monthlyExpenses = Math.max(1, clampNum($('wizExpenses').value, 0, 10_000_000, 1));
+  const totalAvailable = savings + loan;
+  const runwayMonths = totalAvailable / monthlyExpenses;
+  return { savings, loan, monthlyExpenses, totalAvailable, runwayMonths };
+}
+
+function drawCushionChart(data) {
+  const svg = $('wizChart');
+  if (!svg) return;
+  const W = 800, H = 220, padL = 60, padR = 15, padT = 15, padB = 30;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+
+  const months = Math.min(36, Math.max(1, Math.ceil(data.runwayMonths) + 2));
+  const barCount = months;
+  const barW = plotW / barCount * 0.65;
+  const gap = plotW / barCount;
+  const maxVal = Math.max(1, data.totalAvailable);
+
+  const bars = [];
+  for (let m = 0; m < barCount; m++) {
+    const remaining = Math.max(0, data.totalAvailable - data.monthlyExpenses * m);
+    const barH = (remaining / maxVal) * plotH;
+    const x = padL + m * gap + (gap - barW) / 2;
+    const y = padT + plotH - barH;
+    const color = remaining <= 0 ? '#e0577e' : (m >= data.runwayMonths - 1 ? '#e0a13f' : '#3ecf8e');
+    bars.push(`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(1,barH).toFixed(1)}" fill="${color}" rx="2"/>`);
+  }
+
+  const gridLines = [];
+  for (let g = 0; g <= 4; g++) {
+    const gy = padT + (g / 4) * plotH;
+    const val = Math.round(maxVal - (g / 4) * maxVal);
+    gridLines.push(`<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`);
+    gridLines.push(`<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="10" fill="#8a94a6">$${val.toLocaleString()}</text>`);
+  }
+
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  svg.innerHTML = `${gridLines.join('')}${bars.join('')}`;
+}
+
+function runCushionCalc() {
+  if (!$('wizSavings')) return;
+  const data = computeCushion();
+  drawCushionChart(data);
+  const runwayLabel = data.runwayMonths >= 36 ? '36+ months' : `${data.runwayMonths.toFixed(1)} months`;
+  let flag = '';
+  if (data.runwayMonths < 3) {
+    flag = `<div class="empty-note" style="margin-top:10px;border-color:var(--bad,#e0577e);">⚠ Under 3 months of runway — a common red-flag threshold for a new business with no revenue yet.</div>`;
+  }
+  $('wizSummary').innerHTML = `
+    <div class="sim-summary-card">
+      <div class="sim-summary-label">Total available (savings + loan)</div>
+      <div class="sim-summary-value">$${Math.round(data.totalAvailable).toLocaleString()}</div>
+    </div>
+    <div class="sim-summary-card">
+      <div class="sim-summary-label">Runway at current burn rate</div>
+      <div class="sim-summary-value income">${runwayLabel}</div>
+    </div>
+    ${flag}
+  `;
+}
+
+// ---- Wizard step navigation ----
+const CUSHION_WIZ_STEPS = 5;
+let cushionWizStep = 1;
+
+function renderWizDots() {
+  const wrap = $('cushionWizardDots');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  for (let i = 1; i <= CUSHION_WIZ_STEPS; i++) {
+    const dot = document.createElement('span');
+    dot.className = 'wizard-dot' + (i === cushionWizStep ? ' active' : i < cushionWizStep ? ' done' : '');
+    wrap.appendChild(dot);
+  }
+}
+
+function showWizStep(n) {
+  cushionWizStep = n;
+  for (let i = 1; i <= CUSHION_WIZ_STEPS; i++) {
+    const el = $('cushionStep' + i);
+    if (el) el.style.display = i === n ? 'block' : 'none';
+  }
+  renderWizDots();
+  $('cushionWizBackBtn').style.visibility = n === 1 ? 'hidden' : 'visible';
+  const nextBtn = $('cushionWizNextBtn');
+  if (n === CUSHION_WIZ_STEPS) {
+    nextBtn.style.display = 'none';
+    runCushionCalc();
+  } else {
+    nextBtn.style.display = 'inline-flex';
+    nextBtn.querySelector('span').textContent = n === CUSHION_WIZ_STEPS - 1 ? 'See my runway' : 'Next';
+    // Leaving the results step (or not there yet) — clear any stale assessment
+    // so a later re-visit never shows a "Claude's read" based on old numbers.
+    if ($('wizAssessResult')) $('wizAssessResult').innerHTML = '';
+    if ($('wizAssessLoading')) $('wizAssessLoading').style.display = 'none';
+  }
+}
+
+if ($('cushionWizardOpenBtn')) {
+  $('cushionWizardOpenBtn').addEventListener('click', () => {
+    showWizStep(1);
+    $('cushionWizardModal').style.display = 'flex';
+  });
+}
+if ($('cushionWizardCloseBtn')) {
+  $('cushionWizardCloseBtn').addEventListener('click', () => { $('cushionWizardModal').style.display = 'none'; });
+}
+if ($('cushionWizNextBtn')) {
+  $('cushionWizNextBtn').addEventListener('click', () => {
+    if (cushionWizStep < CUSHION_WIZ_STEPS) showWizStep(cushionWizStep + 1);
+  });
+}
+if ($('cushionWizBackBtn')) {
+  $('cushionWizBackBtn').addEventListener('click', () => {
+    if (cushionWizStep > 1) showWizStep(cushionWizStep - 1);
+  });
+}
+
+if ($('wizAssessBtn')) {
+  $('wizAssessBtn').addEventListener('click', async () => {
+    const btn = $('wizAssessBtn');
+    btn.disabled = true;
+    $('wizAssessResult').innerHTML = '';
+    $('wizAssessLoading').style.display = 'block';
+    $('wizAssessLoading').innerHTML = loadingHTML('Checking this against real sources…');
+    try {
+      const data = computeCushion();
+      const hoursWeek = clampNum($('wizHours').value, 0, 168, 0);
+      const result = await postJSON('/api/cushion-assessment', {
+        idea: state.ideaPrompt || $('ideaName').value,
+        savings: data.savings,
+        loan: data.loan,
+        monthlyExpenses: data.monthlyExpenses,
+        runwayMonths: Math.round(data.runwayMonths * 10) / 10,
+        hoursPerWeek: hoursWeek,
+      });
+      $('wizAssessResult').innerHTML = `
+        <div class="field" style="margin-top:10px;">
+          <label>Claude's read</label>
+          <p style="font-size:13.5px;line-height:1.6;color:var(--ink-soft);margin:0;">${escapeHTML(result.assessment)}</p>
+        </div>
+        ${result.timeCommitmentNote ? `<div class="field"><label>On your time commitment</label><p style="font-size:13.5px;line-height:1.6;color:var(--ink-soft);margin:0;">${escapeHTML(result.timeCommitmentNote)}</p></div>` : ''}
+        <div class="field"><label>Advice</label><ul class="evidence-list">${(result.advice || []).map(raw => { const p = normalizeClaim(raw); return `<li><span class="tag">Advice</span>${escapeHTML(p.text)}${citeButton(p.source)}</li>`; }).join('')}</ul></div>
+      `;
+    } catch (err) {
+      $('wizAssessResult').innerHTML = `<div class="empty-note">Couldn't get an assessment (${err.message}). Try again.</div>`;
+    } finally {
+      $('wizAssessLoading').style.display = 'none';
+      btn.disabled = false;
+    }
+  });
+}
+
+if ($('wizUseNumberBtn')) {
+  $('wizUseNumberBtn').addEventListener('click', () => {
+    const data = computeCushion();
+    $('cushionFundAmount').value = Math.round(data.totalAvailable);
+    $('cushionWizardModal').style.display = 'none';
+  });
+}
+
+if ($('cushionWizardModal')) {
+  $('cushionWizardModal').addEventListener('click', (e) => {
+    if (e.target.id === 'cushionWizardModal') $('cushionWizardModal').style.display = 'none';
+  });
+}
+
+// ==================== LEARN TAB: FAQ (real sources, written once) ====================
+const FAQ_DATA = [
+  { category: 'Legal structure', q: 'What is an LLC?',
+    a: "An LLC (Limited Liability Company) is a business structure created under state law that separates your personal assets from your business's debts and liabilities. If the business is sued or can't pay its debts, your personal savings, car, or house are generally protected. It's popular with new business owners because it's simpler to set up and run than a corporation, while still offering that liability shield.",
+    source: { name: 'IRS.gov — Limited liability company (LLC)', url: 'https://www.irs.gov/businesses/small-businesses-self-employed/limited-liability-company-llc' } },
+  { category: 'Legal structure', q: 'What is an S-corp, and how is it different from an LLC?',
+    a: "An S-corp isn't a business structure on its own — it's a tax election a corporation (or sometimes an LLC) can make with the IRS. The main appeal is that S-corp profits pass through to the owners' personal tax returns and avoid the \"double taxation\" that regular corporations face. An LLC, by contrast, is a legal structure, and by default its owners pay self-employment tax on all profits; some LLC owners elect S-corp tax treatment specifically to reduce that burden.",
+    source: { name: "SBA.gov — Choose a business structure", url: 'https://www.sba.gov/business-guide/launch-your-business/choose-business-structure' } },
+  { category: 'Legal structure', q: 'Sole proprietorship vs LLC — when does it matter?',
+    a: 'A sole proprietorship is the default if you start doing business alone and file no paperwork to create a separate entity — simple, but you and the business are legally the same, meaning your personal assets are on the hook for business debts or lawsuits. An LLC requires state filing and fees, but creates a legal shield. It matters most once you have real liability exposure — clients, contracts, employees, or products that could cause harm.',
+    source: { name: 'IRS.gov — Sole proprietorships', url: 'https://www.irs.gov/businesses/small-businesses-self-employed/sole-proprietorships' } },
+  { category: 'Legal structure', q: 'Do I need to register my business with my state?',
+    a: "In most cases, yes — how and where depends on your business structure and location. Registering makes your business a distinct legal entity, which is often required to get liability protection, open a business bank account, or qualify for certain tax treatment. Skipping registration when it's required can cost you legal and tax benefits you'd otherwise get.",
+    source: { name: 'SBA.gov — Register your business', url: 'https://www.sba.gov/business-guide/launch-your-business/register-your-business' } },
+  { category: 'Financing', q: 'What\'s a "cushion fund" (emergency runway) and how much should I have?',
+    a: "A cushion fund (or cash reserve) is money set aside separately from day-to-day operating cash, meant to cover the business through a slow month, an unexpected expense, or a late-paying client. Most small-business advisors recommend keeping enough to cover several months of operating expenses so a short-term shock doesn't force you to shut down or take on emergency debt.",
+    source: { name: 'SCORE (SBA resource partner) — Emergency Fund for Small Businesses', url: 'https://www.score.org/ca/san-diego/articles/emergency-fund-small-businesses/' } },
+  { category: 'Financing', q: 'What are the common types of small business loans?',
+    a: 'SBA loans (like the 7(a) program) are made by banks or lenders but partially guaranteed by the government, which reduces lender risk and can make financing accessible to newer businesses. A term loan gives you a lump sum upfront repaid on a fixed schedule — good for a one-time need like equipment. A line of credit works like a credit card: you draw as needed up to a limit and only pay interest on what you use.',
+    source: { name: 'SBA.gov — 7(a) loans', url: 'https://www.sba.gov/loans/7a-loans/' } },
+  { category: 'Financing', q: 'What is a "personal guarantee" on a business loan?',
+    a: 'A personal guarantee is a promise you make, as the owner, to personally repay a business loan if the business itself can\'t. It means your personal assets — savings, home, credit score — can be at risk even though the loan is technically to the business. Lenders often require this from new or small businesses without an established credit history of their own.',
+    source: { name: 'LendingTree — What Is a Personal Guarantee on a Business Loan?', url: 'https://www.lendingtree.com/business/requirements/personal-guarantee/' } },
+  { category: 'Financing', q: 'Business credit card vs personal credit card — does it matter?',
+    a: "Yes, even for a brand-new, one-person business. A business card keeps business spending separate from personal spending, which makes bookkeeping and tax time much easier and starts building credit history for the business itself. Business cards also tend to offer higher limits and spending controls personal cards don't.",
+    source: { name: 'NerdWallet — Business vs. Personal Credit Cards', url: 'https://www.nerdwallet.com/business/credit-cards/learn/major-differences-business-credit-cards-personal-credit-cards' } },
+  { category: 'Money & margins', q: "What's the difference between gross margin and net margin?",
+    a: "Gross margin is what's left of revenue after subtracting just the direct cost of making or delivering your product (cost of goods sold) — it shows how efficiently you produce what you sell. Net margin is what's left after subtracting every expense: rent, salaries, marketing, taxes, everything. It's possible to have a healthy gross margin but still lose money overall once all expenses are counted.",
+    source: { name: 'AccountingTools — Gross Margin vs Net Margin', url: 'https://www.accountingtools.com/articles/what-is-the-difference-between-gross-margin-and-net-margin.html' } },
+  { category: 'Money & margins', q: 'What is a "break-even point"?',
+    a: "Your break-even point is the sales level at which total revenue exactly equals total costs — not losing money, but not profitable yet either. Every dollar past that point contributes to actual profit. It's one of the most useful numbers for a new business because it tells you exactly how much you need to sell just to survive.",
+    source: { name: 'SBA.gov — Break-even point', url: 'https://www.sba.gov/business-guide/plan-your-business/calculate-your-startup-costs/break-even-point' } },
+  { category: 'Money & margins', q: 'What counts as a startup cost vs an operating cost?',
+    a: 'Startup costs are one-time expenses paid before you ever open or make your first sale — equipment, licenses, initial inventory, website setup. Operating costs are ongoing, recurring expenses that keep the business running month to month, like rent, salaries, and utilities. Startup costs need to be funded upfront; operating costs need to be covered by ongoing revenue.',
+    source: { name: 'SBA.gov — Calculate your startup costs', url: 'https://www.sba.gov/business-guide/plan-your-business/calculate-your-startup-costs' } },
+  { category: 'Money & margins', q: 'What is Schedule C, and who has to file it?',
+    a: "Schedule C is the IRS tax form used to report the income and expenses of a business run as a sole proprietor (including most single-owner LLCs that haven't elected corporate tax treatment). It's how the IRS figures your actual business profit or loss, which then flows onto your personal tax return. If you're self-employed or freelancing and haven't formed a corporation, you'll almost certainly need to file one.",
+    source: { name: 'IRS.gov — About Schedule C (Form 1040)', url: 'https://www.irs.gov/forms-pubs/about-schedule-c-form-1040' } },
+  { category: 'Money & margins', q: 'Independent contractor (1099) vs employee (W-2) — why does it matter?',
+    a: 'The core legal test is control: a contractor decides how and when the work gets done; an employee follows the business\'s direction on both process and schedule. This matters because employees require payroll tax withholding, unemployment insurance, and often benefits, while contractors handle their own taxes. Misclassifying an employee as a contractor to save money is a common, costly mistake that can trigger IRS penalties.',
+    source: { name: 'IRS.gov — Independent contractor defined', url: 'https://www.irs.gov/businesses/small-businesses-self-employed/independent-contractor-defined' } },
+  { category: 'Money & margins', q: 'What is self-employment tax?',
+    a: "Self-employment tax covers the Social Security and Medicare contributions an employer would normally split with an employee — but since you're both, you pay the full amount yourself. The current rate is 15.3% of net self-employment earnings, separate from and in addition to regular income tax — which is why many self-employed people are surprised by how much they owe at tax time.",
+    source: { name: 'IRS.gov — Self-employment tax', url: 'https://www.irs.gov/businesses/small-businesses-self-employed/self-employment-tax-social-security-and-medicare-taxes' } },
+];
+
+function renderFAQ() {
+  const list = $('faqList');
+  if (!list) return;
+
+  // Plain, always-visible Q&A list — every question and its answer is
+  // shown at once, grouped by category, no search box, no clicking to
+  // reveal anything. Just a normal FAQ page you scroll through.
+  const categories = [...new Set(FAQ_DATA.map(f => f.category))];
+  list.innerHTML = categories.map(cat => {
+    const items = FAQ_DATA.filter(f => f.category === cat);
+    return `
+      <div class="faq-category-label">${escapeHTML(cat)}</div>
+      ${items.map(item => `
+        <div class="faq-item">
+          <div class="faq-question-static">${escapeHTML(item.q)}</div>
+          <div class="faq-answer-static">
+            <p style="margin:0 0 8px;">${escapeHTML(item.a)}</p>
+            <div class="faq-source">Source: <a href="${escapeHTML(item.source.url)}" target="_blank" rel="noopener">${escapeHTML(item.source.name)}</a></div>
+          </div>
+        </div>
+      `).join('')}
+    `;
+  }).join('');
+}
+
+if ($('faqList')) {
+  renderFAQ();
+}
+
+// ==================== ASK CLAUDE (Learn tab) — real source + excerpt required ====================
+const ASK_CLAUDE_MAX = 400;
+if ($('askClaudeBox')) {
+  $('askClaudeBox').addEventListener('input', () => {
+    const len = $('askClaudeBox').value.length;
+    $('askClaudeCounter').textContent = `(${len}/${ASK_CLAUDE_MAX})`;
+  });
+
+  $('askClaudeBtn').addEventListener('click', async () => {
+    const question = $('askClaudeBox').value.trim();
+    if (!question) return;
+    if (question.length > ASK_CLAUDE_MAX) {
+      alert(`Keep it under ${ASK_CLAUDE_MAX} characters.`);
+      return;
+    }
+    const btn = $('askClaudeBtn');
+    btn.disabled = true;
+    $('askClaudeResult').innerHTML = '';
+    $('askClaudeLoading').style.display = 'block';
+    $('askClaudeLoading').innerHTML = loadingHTML('Checking real sources…');
+    try {
+      const result = await postJSON('/api/ask-founder', { question });
+      $('askClaudeResult').innerHTML = `
+        <div class="field" style="margin-top:14px;">
+          <p style="font-size:13.5px;line-height:1.6;color:var(--ink-soft);margin:0 0 8px;">${escapeHTML(result.answer)}</p>
+          ${result.sourceUrl ? `
+            <div class="faq-source">Source: <a href="${escapeHTML(result.sourceUrl)}" target="_blank" rel="noopener">${escapeHTML(result.sourceName || result.sourceUrl)}</a></div>
+            <div class="ask-claude-excerpt">"${escapeHTML(result.excerpt || '')}"</div>
+          ` : `<div class="empty-note">No specific source found for this one — treat it as general guidance, not a cited fact.</div>`}
+        </div>
+      `;
+      $('askClaudeBox').value = '';
+      $('askClaudeCounter').textContent = `(0/${ASK_CLAUDE_MAX})`;
+    } catch (err) {
+      $('askClaudeResult').innerHTML = `<div class="empty-note">Couldn't get an answer (${err.message}). Try again.</div>`;
+    } finally {
+      $('askClaudeLoading').style.display = 'none';
+      btn.disabled = false;
+    }
+  });
+}
+
+goToStep(0);
+lockSteps();
+checkSession();

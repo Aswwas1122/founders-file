@@ -1,0 +1,1183 @@
+let state = {
+  ideaName: '', ideaPrompt: '', ideaBudget: '', ideaLocation: '',
+  round1: null, round2: null, round3: null, user: null, submissionId: null,
+};
+const $ = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------------
+// Left-side step navigation. Step 0 (the idea) is always unlocked; steps 1-4
+// stay locked/grayed-out until Round 1 has a result. Once unlocked, the
+// remaining steps can be visited in any order.
+// ---------------------------------------------------------------------------
+
+function goToStep(round) {
+  document.querySelectorAll('.side-nav-item').forEach(n => n.classList.toggle('active', n.dataset.round === String(round)));
+  document.querySelectorAll('.round-page').forEach(p => p.style.display = 'none');
+  const page = $('round' + round);
+  if (page) page.style.display = 'block';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function unlockSteps() {
+  ['navStep1', 'navStep2', 'navStep3', 'navStep4'].forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    el.disabled = false;
+    el.classList.remove('locked');
+  });
+}
+
+function lockSteps() {
+  ['navStep1', 'navStep2', 'navStep3', 'navStep4'].forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    el.disabled = true;
+    el.classList.add('locked');
+  });
+}
+
+document.querySelectorAll('.side-nav-item').forEach(item => {
+  item.addEventListener('click', () => {
+    if (item.disabled) return;
+    goToStep(item.dataset.round);
+  });
+});
+
+$('ideaName').addEventListener('input', (e) => { state.ideaName = e.target.value; });
+$('ideaBudget').addEventListener('input', (e) => { state.ideaBudget = e.target.value; });
+$('ideaLocation').addEventListener('input', (e) => { state.ideaLocation = e.target.value; });
+
+function loadingHTML(msg) {
+  return `<div class="loading-line"><span class="spinner"></span>${msg}</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Source citations: a small hover/click popover showing where a claim came
+// from. Backward-compatible with older saved data where claims were plain
+// strings (no source) rather than {claim, source} objects.
+// ---------------------------------------------------------------------------
+
+function normalizeClaim(item) {
+  if (item && typeof item === 'object') {
+    return { text: item.claim || '', source: item.source || null };
+  }
+  return { text: String(item || ''), source: null };
+}
+
+function claimMdLine(raw) {
+  const c = normalizeClaim(raw);
+  return c.source ? `- ${c.text} (source: ${c.source})` : `- ${c.text}`;
+}
+
+function citeButton(source) {
+  const has = !!source;
+  const label = has ? 'View source' : 'No specific source cited';
+  return `<button type="button" class="cite-btn${has ? '' : ' cite-btn-none'}" data-source="${escapeHTML(source || '')}" aria-label="${label}" title="${label}">i</button>`;
+}
+
+let citeTooltipEl = null;
+function ensureCiteTooltip() {
+  if (citeTooltipEl) return citeTooltipEl;
+  citeTooltipEl = document.createElement('div');
+  citeTooltipEl.className = 'cite-tooltip';
+  citeTooltipEl.style.display = 'none';
+  document.body.appendChild(citeTooltipEl);
+  return citeTooltipEl;
+}
+
+function showCiteTooltip(btn) {
+  const tip = ensureCiteTooltip();
+  const source = btn.dataset.source;
+  if (source) {
+    let host = source;
+    try { host = new URL(source).hostname.replace(/^www\./, ''); } catch (e) { /* keep raw */ }
+    tip.innerHTML = `<div class="cite-tooltip-label">Source</div><a href="${escapeHTML(source)}" target="_blank" rel="noopener noreferrer">${escapeHTML(host)} ↗</a>`;
+  } else {
+    tip.innerHTML = `<div class="cite-tooltip-label">Not independently sourced</div><div class="cite-tooltip-body">This is Claude's general reasoning, not a claim tied to a specific retrieved source.</div>`;
+  }
+  tip.style.display = 'block';
+  const rect = btn.getBoundingClientRect();
+  const tipRect = tip.getBoundingClientRect();
+  let left = rect.left + rect.width / 2 - tipRect.width / 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - tipRect.width - 8));
+  const top = rect.top - tipRect.height - 8;
+  tip.style.left = left + window.scrollX + 'px';
+  tip.style.top = (top < 0 ? rect.bottom + 8 : top) + window.scrollY + 'px';
+}
+
+function hideCiteTooltip() {
+  if (citeTooltipEl) citeTooltipEl.style.display = 'none';
+}
+
+document.addEventListener('mouseover', (e) => {
+  const btn = e.target.closest('.cite-btn');
+  if (btn) showCiteTooltip(btn);
+});
+document.addEventListener('mouseout', (e) => {
+  if (e.target.closest('.cite-btn')) hideCiteTooltip();
+});
+document.addEventListener('focusin', (e) => {
+  const btn = e.target.closest('.cite-btn');
+  if (btn) showCiteTooltip(btn);
+});
+document.addEventListener('focusout', (e) => {
+  if (e.target.closest('.cite-btn')) hideCiteTooltip();
+});
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.cite-btn');
+  if (btn) { e.preventDefault(); showCiteTooltip(btn); }
+  else if (!e.target.closest('.cite-tooltip')) hideCiteTooltip();
+});
+
+function scoreStampClass(score) {
+  if (score >= 65) return 'pos';
+  if (score >= 40) return 'mid';
+  return '';
+}
+
+function escapeHTML(s) {
+  if (s === undefined || s === null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+async function getJSON(url) {
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+async function deleteJSON(url) {
+  const res = await fetch(url, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+// ---- STEP 0 / ROUND 1 (the required intake) ----
+$('runAnalysis').addEventListener('click', async () => {
+  const prompt = $('ideaPrompt').value.trim();
+  const budget = $('ideaBudget').value.trim();
+  const location = $('ideaLocation').value.trim();
+
+  if (!prompt) { $('ideaPrompt').focus(); return; }
+  if (!budget) { $('ideaBudget').focus(); return; }
+  if (!location) { $('ideaLocation').focus(); return; }
+
+  state.ideaPrompt = prompt;
+  state.ideaBudget = budget;
+  state.ideaLocation = location;
+
+  $('analysisResult').innerHTML = '';
+  $('analysisDoneNote').style.display = 'none';
+  $('analysisLoading').style.display = 'block';
+  $('analysisLoading').innerHTML = loadingHTML('Reading the market for this idea…');
+  $('runAnalysis').disabled = true;
+
+  try {
+    const result = await postJSON('/api/analyze', { idea: prompt, budget, location });
+    state.round1 = result;
+    renderRound1(result);
+    unlockSteps();
+    $('analysisDoneNote').style.display = 'block';
+    goToStep(1);
+  } catch (err) {
+    $('analysisResult').innerHTML = `<div class="empty-note">The analysis didn't come back (${err.message}). Check that the backend is running and ANTHROPIC_API_KEY is set, then try again.</div>`;
+  } finally {
+    $('analysisLoading').style.display = 'none';
+    $('runAnalysis').disabled = false;
+  }
+});
+
+function animateCountUp(el, target, duration = 900) {
+  const start = performance.now();
+  function tick(now) {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+    el.textContent = Math.round(eased * target);
+    if (t < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+function round1HTML(r) {
+  const cls = scoreStampClass(r.score);
+  const positives = (r.positives || []).map((raw, i) => {
+    const p = normalizeClaim(raw);
+    return `<li style="animation-delay:${i * 60}ms" class="reveal-item"><span class="tag">In favor</span>${escapeHTML(p.text)}${citeButton(p.source)}</li>`;
+  }).join('');
+  const risks = (r.risks || []).map((raw, i) => {
+    const p = normalizeClaim(raw);
+    return `<li class="risk reveal-item" style="animation-delay:${(i + (r.positives || []).length) * 60}ms"><span class="tag">Risk / open question</span>${escapeHTML(p.text)}${citeButton(p.source)}</li>`;
+  }).join('');
+
+  return `
+    <div class="verdict">
+      <div class="stamp ${cls}">
+        <div class="score" id="scoreNum">0</div>
+        <div class="of100">OUT OF 100</div>
+      </div>
+      <div class="verdict-text">
+        <div class="call">${escapeHTML(r.verdict)}</div>
+        <p>${escapeHTML(r.summary)}</p>
+      </div>
+    </div>
+    <ul class="evidence-list">
+      ${positives}
+      ${risks}
+    </ul>
+  `;
+}
+
+function renderRound1(r) {
+  $('round1Result').innerHTML = round1HTML(r);
+  animateCountUp($('scoreNum'), Number(r.score) || 0);
+  $('status1').classList.add('done');
+  updateExportVisibility();
+}
+
+// ---- ROUND 2 ----
+$('runModel').addEventListener('click', async () => {
+  const notes = $('r2notes').value.trim();
+  $('modelResult').innerHTML = '';
+  $('modelLoading').style.display = 'block';
+  $('modelLoading').innerHTML = loadingHTML('Sketching the model…');
+  $('runModel').disabled = true;
+
+  try {
+    const result = await postJSON('/api/model', {
+      idea: state.ideaPrompt || $('ideaName').value,
+      budget: state.ideaBudget,
+      location: state.ideaLocation,
+      round1: state.round1,
+      notes,
+    });
+    state.round2 = result;
+    renderRound2(result);
+  } catch (err) {
+    $('modelResult').innerHTML = `<div class="empty-note">The model didn't come back (${err.message}). Try again.</div>`;
+  } finally {
+    $('modelLoading').style.display = 'none';
+    $('runModel').disabled = false;
+  }
+});
+
+function moneyPanel(title, items, cls, totalLabel) {
+  const maxAmt = Math.max(1, ...items.map(x => x.amount || 0));
+  const total = items.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+  const rows = items.map((x, i) => `
+    <div class="flow-row reveal-item" style="animation-delay:${i * 50}ms">
+      <div class="flow-row-top">
+        <span class="flow-label">${escapeHTML(x.label)}</span>
+        <span class="flow-amount mono">$${Number(x.amount).toLocaleString()}</span>
+      </div>
+      <div class="flow-bar-track"><div class="flow-bar-fill ${cls}" style="width:${Math.max(3, (x.amount / maxAmt * 100))}%"></div></div>
+    </div>`).join('');
+  return `
+    <div class="money-panel ${cls}-panel">
+      <h4>${title}</h4>
+      ${rows || '<div class="empty-note" style="padding:10px 0;">Nothing listed</div>'}
+      <div class="money-panel-total"><span>${totalLabel}</span><span class="mono">$${total.toLocaleString()}</span></div>
+    </div>`;
+}
+
+function renderRound2(m) {
+  $('modelResult').innerHTML = `
+    <div class="model-grid">
+      <div class="model-card reveal-item" style="animation-delay:0ms"><h3>Customer</h3><p style="font-size:13.5px;line-height:1.55;margin:0;">${escapeHTML(m.customer)}</p></div>
+      <div class="model-card reveal-item" style="animation-delay:80ms"><h3>Revenue model</h3><p style="font-size:13.5px;line-height:1.55;margin:0;">${escapeHTML(m.revenueModel)}</p></div>
+      <div class="model-card reveal-item" style="grid-column: 1 / -1; animation-delay:160ms"><h3>Why they choose this</h3><p style="font-size:13.5px;line-height:1.55;margin:0;">${escapeHTML(m.valueProp)}</p></div>
+    </div>
+
+    <h3 style="font-size:14px;margin:22px 0 12px;">Where the money goes in — and out</h3>
+    <div class="money-flow-split reveal-item" style="animation-delay:220ms">
+      ${moneyPanel('Money in — revenue', m.revenueBreakdown || [], 'in', 'Total projected revenue')}
+      ${moneyPanel('Money out — startup costs', m.costBreakdown || [], 'out', 'Total to launch')}
+    </div>
+    <div class="money-flow-net">
+      <span>Total to launch</span>
+      <span class="mono">$${Number(m.totalStartupInvestment || 0).toLocaleString()}</span>
+    </div>
+
+    <div class="field" style="margin-top:20px;">
+      <label>First milestone</label>
+      <p style="font-size:13.5px;line-height:1.55;color:var(--ink-soft);margin:0;">${escapeHTML(m.firstMilestone)}</p>
+    </div>
+  `;
+  $('status2').classList.add('done');
+  updateExportVisibility();
+}
+
+// ---- ROUND 3 (optional — can be run with or without Round 2) ----
+$('mockExtensionBtn').addEventListener('click', () => {
+  const mockData = "Macbook Pro $2100\nAWS Hosting $120\nFacebook Ads $350\nBusiness cards $45\nCoffee with client $25\nDomain name $12\nCanva Pro subscription $15";
+  $('r3expenses').value = mockData;
+});
+
+if ($('useSimInTaxBtn')) {
+  $('useSimInTaxBtn').addEventListener('click', () => {
+    if (!simLastResult) {
+      alert('Run the Simulator first (Simulator tab), then come back and use its numbers here.');
+      return;
+    }
+    const lines = simLastResult.streams.map(s =>
+      `${s.name} (${s.mode === 'reinvest' ? 'reinvested into business' : 'owner personal income'}) — projected $${Math.round(s.total).toLocaleString()} over ${simLastResult.months} months`
+    );
+    lines.push(`Business capital projected: $${Math.round(simLastResult.finalCapital).toLocaleString()} after ${simLastResult.months} months`);
+    lines.push(`Owner personal income projected: $${Math.round(simLastResult.finalIncome).toLocaleString()} after ${simLastResult.months} months`);
+    $('r3expenses').value = ($('r3expenses').value ? $('r3expenses').value + '\n\n' : '') + 'From the Simulator:\n' + lines.join('\n');
+  });
+}
+
+$('runTax').addEventListener('click', async () => {
+  $('taxResult').innerHTML = '';
+  $('taxLoading').style.display = 'block';
+  $('taxLoading').innerHTML = loadingHTML('Mapping this to Schedule C…');
+  $('runTax').disabled = true;
+
+  try {
+    const result = await postJSON('/api/tax', {
+      idea: state.ideaPrompt || $('ideaName').value,
+      budget: state.ideaBudget,
+      location: state.ideaLocation,
+      round2: state.round2,
+      expenses: $('r3expenses').value.trim()
+    });
+    state.round3 = result;
+    renderRound3(result);
+  } catch (err) {
+    $('taxResult').innerHTML = `<div class="empty-note">The organizer didn't come back (${err.message}). Try again.</div>`;
+  } finally {
+    $('taxLoading').style.display = 'none';
+    $('runTax').disabled = false;
+  }
+});
+
+const ACCOUNTING_FIRMS = [
+  { name: 'Bench', desc: 'Bookkeeping built for small businesses and freelancers, with optional tax filing add-on.' },
+  { name: 'Block Advisors (H&R Block)', desc: 'Small-business-focused tax pros, in-person or virtual, comfortable with first-time Schedule C filers.' },
+  { name: 'A local CPA who works with sole proprietors', desc: 'Often the best value once revenue is real — ask other small business owners in your area for a referral.' },
+];
+
+function renderRound3(t) {
+  let html = `<div class="field"><label>Business structure, for now</label><p style="font-size:13.5px;line-height:1.6;color:var(--ink-soft);margin:0;">${escapeHTML(t.structureNote)}</p></div>`;
+
+  if (t.recommendedStructure) {
+    html += `
+      <div class="field structure-rec">
+        <label>Recommended registration for this business</label>
+        <div class="structure-rec-entity">${escapeHTML(t.recommendedStructure.entity)}</div>
+        <p style="font-size:13.5px;line-height:1.6;color:var(--ink-soft);margin:6px 0 0;">${escapeHTML(t.recommendedStructure.reasoning)}</p>
+        <p style="font-size:12.5px;color:var(--ink-dim);margin:8px 0 0;"><em>When to revisit:</em> ${escapeHTML(t.recommendedStructure.whenToRevisit)}</p>
+      </div>
+    `;
+  }
+
+  if (t.projectedScheduleC) {
+    html += `
+      <h3 style="font-size:14px;margin:22px 0 4px;">Projected Schedule C Summary</h3>
+      <div style="background: rgba(255,255,255,0.03); padding: 15px; border-radius: 8px; border: 1px solid var(--line); margin-bottom: 20px;">
+        <div style="display:flex; justify-content:space-between; margin-bottom: 8px;"><span>Estimated Gross Income:</span> <span class="mono">$${Number(t.projectedScheduleC.estimatedIncome || 0).toLocaleString()}</span></div>
+        <div style="display:flex; justify-content:space-between; margin-bottom: 8px;"><span>Total Deductible Expenses:</span> <span class="mono">-$${Number(t.projectedScheduleC.totalExpenses || 0).toLocaleString()}</span></div>
+        <div style="display:flex; justify-content:space-between; font-weight:600; border-top: 1px dashed var(--line); padding-top: 8px; margin-top: 8px;"><span>Estimated Net Profit:</span> <span class="mono">$${Number(t.projectedScheduleC.netProfit || 0).toLocaleString()}</span></div>
+      </div>
+    `;
+
+    if (t.projectedScheduleC.categorizedExpenses && t.projectedScheduleC.categorizedExpenses.length > 0) {
+      html += `
+        <h3 style="font-size:14px;margin:22px 0 4px;">Categorized Expenses</h3>
+        <table class="deduction-table">
+          <thead><tr><th>Item</th><th>Line</th><th>Category</th><th style="text-align:right;">Amount</th></tr></thead>
+          <tbody>${t.projectedScheduleC.categorizedExpenses.map(d => `<tr><td>${escapeHTML(d.item)}</td><td class="line">${escapeHTML(d.scheduleCLine)}</td><td>${escapeHTML(d.category)}</td><td style="text-align:right;" class="mono">$${Number(d.amount).toLocaleString()}</td></tr>`).join('')}</tbody>
+        </table>
+      `;
+    }
+  }
+
+  if (t.taxStrategies && t.taxStrategies.length > 0) {
+    html += `
+      <div class="field" style="margin-top:22px;">
+        <label>Tax Strategies & Tips</label>
+        <ul class="evidence-list">${t.taxStrategies.map(raw => { const s = normalizeClaim(raw); return `<li><span class="tag">Strategy</span>${escapeHTML(s.text)}${citeButton(s.source)}</li>`; }).join('')}</ul>
+      </div>
+    `;
+  }
+
+  html += `
+    <div class="field" style="margin-top:22px;"><label>Quarterly taxes & self-employment tax</label><p style="font-size:13.5px;line-height:1.6;color:var(--ink-soft);margin:0;">${escapeHTML(t.quarterlyNote)}</p></div>
+
+    <div class="field">
+      <label>Recordkeeping habits to start now</label>
+      <ul class="evidence-list">${(t.recordkeeping || []).map(r => `<li><span class="tag">Habit</span>${escapeHTML(r)}</li>`).join('')}</ul>
+    </div>
+
+    <div class="field"><label>When to bring in a real accountant</label><p style="font-size:13.5px;line-height:1.6;color:var(--ink-soft);margin:0;">${escapeHTML(t.whenToHireAccountant)}</p></div>
+
+    <h3 style="font-size:14px;margin:22px 0 10px;">Firms that work with small businesses</h3>
+    ${ACCOUNTING_FIRMS.map(f => `<div class="firm-card"><div class="name">${escapeHTML(f.name)}</div><div class="desc">${escapeHTML(f.desc)}</div></div>`).join('')}
+  `;
+  
+  $('taxResult').innerHTML = html;
+  $('status3').classList.add('done');
+  updateExportVisibility();
+}
+
+function updateExportVisibility() {
+  const hasRounds = state.round1 || state.round2 || state.round3;
+  $('exportBtn').style.display = hasRounds ? 'inline-block' : 'none';
+  $('saveToAccountBtn').style.display = hasRounds ? 'inline-block' : 'none';
+}
+
+// ---- export ----
+$('exportBtn').addEventListener('click', () => {
+  const name = state.ideaName || $('ideaName').value || 'Untitled venture';
+  let md = `# ${name}\n\n`;
+  if (state.round1) {
+    md += `## Round 1 — Should I do this?\n\n**Idea:** ${state.ideaPrompt}\n\n**Score:** ${state.round1.score}/100 — ${state.round1.verdict}\n\n${state.round1.summary}\n\n**In favor:**\n${(state.round1.positives || []).map(claimMdLine).join('\n')}\n\n**Risks:**\n${(state.round1.risks || []).map(claimMdLine).join('\n')}\n\n`;
+  }
+  if (state.round2) {
+    md += `## Round 2 — Business model\n\n**Customer:** ${state.round2.customer}\n\n**Revenue model:** ${state.round2.revenueModel}\n\n**Value proposition:** ${state.round2.valueProp}\n\n**Startup investment total:** $${Number(state.round2.totalStartupInvestment || 0).toLocaleString()}\n\n**First milestone:** ${state.round2.firstMilestone}\n\n`;
+  }
+  if (state.round3) {
+    md += `## Round 3 — Tax & finance\n\n${state.round3.structureNote}\n\n`;
+    if (state.round3.projectedScheduleC) {
+      md += `**Projected Schedule C:**\n- Gross Income: $${state.round3.projectedScheduleC.estimatedIncome}\n- Total Expenses: $${state.round3.projectedScheduleC.totalExpenses}\n- Net Profit: $${state.round3.projectedScheduleC.netProfit}\n\n`;
+      if (state.round3.projectedScheduleC.categorizedExpenses) {
+        md += `**Categorized Expenses:**\n${state.round3.projectedScheduleC.categorizedExpenses.map(d => `- ${d.item} ($${d.amount}) — ${d.scheduleCLine}: ${d.category}`).join('\n')}\n\n`;
+      }
+    }
+    if (state.round3.taxStrategies) {
+      md += `**Tax Strategies:**\n${state.round3.taxStrategies.map(claimMdLine).join('\n')}\n\n`;
+    }
+    md += `${state.round3.quarterlyNote}\n\n**When to hire an accountant:** ${state.round3.whenToHireAccountant}\n\n`;
+  }
+  md += `\n---\n*Generated by The Founder's File. Not financial, legal, or tax advice — verify specifics with a CPA.*\n`;
+
+  const blob = new Blob([md], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'founders-file') + '.md';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------------------------------------------------------------------
+// Accounts: signup / login / logout / session check
+// ---------------------------------------------------------------------------
+
+let authMode = 'signup';
+
+// ---------------------------------------------------------------------------
+// Page flow: landing → auth page → app shell.
+// Signed-out visitors always see the landing page first (never the app
+// shell), and land on the auth page only after clicking "Get started" or
+// one of the account-rail buttons.
+// ---------------------------------------------------------------------------
+
+function showLanding() {
+  $('landingPage').style.display = 'flex';
+  $('authPage').style.display = 'none';
+  $('appShell').style.display = 'none';
+}
+
+function showAuthPage(mode) {
+  authMode = mode;
+  $('landingPage').style.display = 'none';
+  $('appShell').style.display = 'none';
+  $('authPage').style.display = 'flex';
+  $('authError').style.display = 'none';
+  $('authEmail').value = '';
+  $('authPassword').value = '';
+  $('authPageTitle').textContent = mode === 'signup' ? 'Create your account' : 'Log in';
+  $('authSubmit').querySelector('span') ? null : null;
+  $('authSubmit').textContent = mode === 'signup' ? 'Create account' : 'Log in';
+  $('authSwitchToLogin').style.display = mode === 'signup' ? 'inline' : 'none';
+  $('authSwitchToSignup').style.display = mode === 'login' ? 'inline' : 'none';
+}
+
+function showAppShell() {
+  $('landingPage').style.display = 'none';
+  $('authPage').style.display = 'none';
+  $('appShell').style.display = 'flex';
+}
+
+function updateAccountUI() {
+  const signedIn = !!state.user;
+  $('accountSignedOut').style.display = signedIn ? 'none' : 'flex';
+  $('accountSignedIn').style.display = signedIn ? 'flex' : 'none';
+  if (signedIn) {
+    $('accountEmail').textContent = state.user.email;
+    $('accountAvatar').textContent = (state.user.email || '?').charAt(0).toUpperCase();
+  }
+
+  if (signedIn) {
+    showAppShell();
+  } else {
+    // Only bounce back to the landing page if we're not already sitting on
+    // the auth page (e.g. after a failed login, don't yank the form away).
+    if ($('authPage').style.display !== 'flex') showLanding();
+  }
+
+  updateExportVisibility();
+
+  if (signedIn && state.user.hasOnboarded === false) {
+    showOnboarding();
+  }
+}
+
+async function checkSession() {
+  try {
+    const data = await getJSON('/api/me');
+    state.user = data.user;
+  } catch (err) {
+    state.user = null;
+  }
+  updateAccountUI();
+}
+
+async function checkAuthProviders() {
+  try {
+    const data = await getJSON('/api/auth-providers');
+    if (data.google && $('googleLoginBtn')) $('googleLoginBtn').style.display = 'flex';
+  } catch (err) { /* leave Google button hidden */ }
+}
+checkAuthProviders();
+
+// ---- Onboarding (first sign-in only) ----
+const ONBOARDING_STEPS = [
+  { title: 'Welcome to The Founder\'s File', body: 'Three rounds turn a raw idea into a business case: a sentiment read, a business model, and a tax organizer — each grounded in real, cited sources where it matters.' },
+  { title: 'Round 1 → Round 3, in order', body: 'Each round builds on the last. You can skip ahead, but the results are sharper when Claude has your Round 1 and 2 answers to work from.' },
+  { title: 'Try the Simulator', body: 'The Simulator tab is pure math, no AI — play with your own revenue streams and see capital vs. personal income over time, without spending an API call.' },
+];
+let onboardingStep = 0;
+
+function ensureOnboardingModal() {
+  if ($('onboardingModal')) return;
+  const el = document.createElement('div');
+  el.className = 'modal-overlay';
+  el.id = 'onboardingModal';
+  el.style.display = 'none';
+  el.innerHTML = `
+    <div class="modal">
+      <h3 id="onboardingTitle" style="margin:0 0 10px;font-size:19px;"></h3>
+      <p id="onboardingBody" style="color:var(--ink-soft);font-size:14px;line-height:1.6;margin:0 0 18px;"></p>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div id="onboardingDots" style="display:flex;gap:6px;"></div>
+        <div style="display:flex;gap:8px;">
+          <button class="ghost" id="onboardingSkip" type="button">Skip</button>
+          <button class="primary" id="onboardingNext" type="button"><span>Next</span></button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(el);
+
+  $('onboardingSkip').addEventListener('click', finishOnboarding);
+  $('onboardingNext').addEventListener('click', () => {
+    onboardingStep++;
+    if (onboardingStep >= ONBOARDING_STEPS.length) finishOnboarding();
+    else renderOnboardingStep();
+  });
+}
+
+function renderOnboardingStep() {
+  const step = ONBOARDING_STEPS[onboardingStep];
+  $('onboardingTitle').textContent = step.title;
+  $('onboardingBody').textContent = step.body;
+  $('onboardingNext').querySelector('span').textContent = onboardingStep === ONBOARDING_STEPS.length - 1 ? 'Get started' : 'Next';
+  $('onboardingDots').innerHTML = ONBOARDING_STEPS.map((_, i) => `<span style="width:6px;height:6px;border-radius:50%;background:${i === onboardingStep ? 'var(--accent)' : 'var(--line)'};display:inline-block;"></span>`).join('');
+}
+
+function showOnboarding() {
+  ensureOnboardingModal();
+  onboardingStep = 0;
+  renderOnboardingStep();
+  $('onboardingModal').style.display = 'flex';
+}
+
+async function finishOnboarding() {
+  $('onboardingModal').style.display = 'none';
+  if (state.user) state.user.hasOnboarded = true;
+  try { await postJSON('/api/onboarding-complete', {}); } catch (err) { /* non-critical */ }
+}
+
+$('landingGetStarted1').addEventListener('click', () => showAuthPage('signup'));
+$('landingGetStarted2').addEventListener('click', () => showAuthPage('signup'));
+$('landingLoginBtn').addEventListener('click', () => showAuthPage('login'));
+$('openSignup').addEventListener('click', () => showAuthPage('signup'));
+$('openLogin').addEventListener('click', () => showAuthPage('login'));
+$('authBackToLanding').addEventListener('click', () => showLanding());
+$('switchToLoginLink').addEventListener('click', (e) => { e.preventDefault(); showAuthPage('login'); });
+$('switchToSignupLink').addEventListener('click', (e) => { e.preventDefault(); showAuthPage('signup'); });
+
+$('authSubmit').addEventListener('click', async () => {
+  const email = $('authEmail').value.trim();
+  const password = $('authPassword').value;
+  $('authError').style.display = 'none';
+  $('authSubmit').disabled = true;
+
+  try {
+    const url = authMode === 'signup' ? '/api/signup' : '/api/login';
+    const data = await postJSON(url, { email, password });
+    state.user = data;
+    updateAccountUI();
+  } catch (err) {
+    $('authError').textContent = err.message;
+    $('authError').style.display = 'block';
+  } finally {
+    $('authSubmit').disabled = false;
+  }
+});
+
+$('logoutBtn').addEventListener('click', async () => {
+  try { await postJSON('/api/logout', {}); } catch (err) { /* ignore */ }
+  state.user = null;
+  state.submissionId = null;
+  updateAccountUI();
+});
+
+// ---------------------------------------------------------------------------
+// Save to account / My saved ideas
+// ---------------------------------------------------------------------------
+
+async function saveCurrentIdea() {
+  const idea = state.ideaPrompt || $('ideaPrompt').value.trim() || $('ideaName').value.trim();
+  if (!idea) throw new Error('Nothing to save yet — describe the idea first.');
+
+  const payload = {
+    idea,
+    caseName: state.ideaName || $('ideaName').value.trim(),
+    budget: state.ideaBudget || $('ideaBudget').value.trim(),
+    location: state.ideaLocation || $('ideaLocation').value.trim(),
+    analyzeResult: state.round1,
+    modelResult: state.round2,
+    taxResult: state.round3,
+  };
+  if (state.submissionId) payload.id = state.submissionId;
+
+  const saved = await postJSON('/api/submissions', payload);
+  state.submissionId = saved.id;
+  return saved;
+}
+
+$('saveToAccountBtn').addEventListener('click', async () => {
+  if (!state.user) { showAuthPage('signup'); return; }
+
+  $('saveToAccountBtn').disabled = true;
+  const originalText = $('saveToAccountBtn').textContent;
+  $('saveToAccountBtn').textContent = 'Saving…';
+
+  try {
+    await saveCurrentIdea();
+    $('saveToAccountBtn').textContent = 'Saved ✓';
+    setTimeout(() => { $('saveToAccountBtn').textContent = originalText; }, 1600);
+  } catch (err) {
+    $('saveToAccountBtn').textContent = originalText;
+    alert('Could not save: ' + err.message);
+  } finally {
+    $('saveToAccountBtn').disabled = false;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// New idea: clears everything to start over, prompting to save first if
+// there's unsaved work in progress.
+// ---------------------------------------------------------------------------
+
+function hasUnsavedWork() {
+  return !!(
+    $('ideaPrompt').value.trim() || $('ideaName').value.trim() ||
+    $('ideaBudget').value.trim() || $('ideaLocation').value.trim() ||
+    state.round1 || state.round2 || state.round3
+  );
+}
+
+function resetIdeaState() {
+  state.ideaName = '';
+  state.ideaPrompt = '';
+  state.ideaBudget = '';
+  state.ideaLocation = '';
+  state.round1 = null;
+  state.round2 = null;
+  state.round3 = null;
+  state.submissionId = null;
+
+  $('ideaName').value = '';
+  $('ideaPrompt').value = '';
+  $('ideaBudget').value = '';
+  $('ideaLocation').value = '';
+  $('r2notes').value = '';
+  $('r3expenses').value = '';
+
+  $('analysisResult').innerHTML = '';
+  $('analysisDoneNote').style.display = 'none';
+  $('round1Result').innerHTML = '';
+  $('modelResult').innerHTML = '';
+  $('taxResult').innerHTML = '';
+  $('status1').classList.remove('done');
+  $('status2').classList.remove('done');
+  $('status3').classList.remove('done');
+
+  lockSteps();
+  updateExportVisibility();
+  goToStep(0);
+}
+
+$('newIdeaBtn').addEventListener('click', () => {
+  if (!hasUnsavedWork()) { resetIdeaState(); return; }
+  $('newIdeaModal').style.display = 'flex';
+});
+
+$('cancelNewIdeaBtn').addEventListener('click', () => { $('newIdeaModal').style.display = 'none'; });
+
+$('discardNewIdeaBtn').addEventListener('click', () => {
+  $('newIdeaModal').style.display = 'none';
+  resetIdeaState();
+});
+
+$('saveThenNewIdeaBtn').addEventListener('click', async () => {
+  if (!state.user) { $('newIdeaModal').style.display = 'none'; showAuthPage('signup'); return; }
+  const btn = $('saveThenNewIdeaBtn');
+  btn.disabled = true;
+  try {
+    await saveCurrentIdea();
+    $('newIdeaModal').style.display = 'none';
+    resetIdeaState();
+  } catch (err) {
+    alert('Could not save: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('openSaved').addEventListener('click', async () => {
+  $('savedModal').style.display = 'flex';
+  $('savedList').innerHTML = loadingHTML('Loading your saved ideas…');
+  try {
+    const subs = await getJSON('/api/submissions');
+    renderSavedList(subs);
+  } catch (err) {
+    $('savedList').innerHTML = `<div class="empty-note small">Couldn't load your saved ideas (${escapeHTML(err.message)}).</div>`;
+  }
+});
+
+$('closeSavedModal').addEventListener('click', () => { $('savedModal').style.display = 'none'; });
+$('savedModal').addEventListener('click', (e) => { if (e.target.id === 'savedModal') $('savedModal').style.display = 'none'; });
+
+function renderSavedList(subs) {
+  if (!subs.length) {
+    $('savedList').innerHTML = '<div class="empty-note small">Nothing saved yet — run a round, then hit "Save this idea".</div>';
+    return;
+  }
+  $('savedList').innerHTML = subs.map(s => {
+    const date = new Date(s.updatedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    const rounds = [s.analyzeResult && 'R1', s.modelResult && 'R2', s.taxResult && 'R3'].filter(Boolean).join(', ') || 'no rounds run';
+    const label = s.caseName || s.idea.slice(0, 60) + (s.idea.length > 60 ? '…' : '');
+    return `
+      <div class="saved-item" data-id="${s.id}">
+        <div class="saved-info">
+          <div class="saved-name">${escapeHTML(label)}</div>
+          <div class="saved-meta">${date} · ${rounds}</div>
+        </div>
+        <div class="saved-actions">
+          <button class="ghost view-saved" data-id="${s.id}">View</button>
+          <button class="ghost load-saved" data-id="${s.id}">Open</button>
+          <button class="ghost delete-saved" data-id="${s.id}">Delete</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  document.querySelectorAll('.view-saved').forEach(btn => {
+    btn.addEventListener('click', () => {
+      window.open('/submissions/' + btn.dataset.id + '/view', '_blank');
+    });
+  });
+  document.querySelectorAll('.load-saved').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sub = subs.find(s => String(s.id) === btn.dataset.id);
+      if (sub) loadSubmission(sub);
+    });
+  });
+  document.querySelectorAll('.delete-saved').forEach(btn => {
+    btn.addEventListener('click', () => {
+      confirmDelete(btn.dataset.id, async () => {
+        await deleteJSON('/api/submissions/' + btn.dataset.id);
+        const remaining = subs.filter(s => String(s.id) !== btn.dataset.id);
+        renderSavedList(remaining);
+        if (state.submissionId === Number(btn.dataset.id)) state.submissionId = null;
+      });
+    });
+  });
+}
+
+function confirmDelete(id, onConfirm) {
+  $('deleteConfirmModal').style.display = 'flex';
+  const confirmBtn = $('confirmDeleteBtn');
+  const cancelBtn = $('cancelDeleteBtn');
+  const cleanup = () => {
+    $('deleteConfirmModal').style.display = 'none';
+    confirmBtn.replaceWith(confirmBtn.cloneNode(true));
+    cancelBtn.replaceWith(cancelBtn.cloneNode(true));
+  };
+  confirmBtn.addEventListener('click', async () => {
+    try {
+      await onConfirm();
+      cleanup();
+    } catch (err) {
+      alert('Could not delete: ' + err.message);
+      cleanup();
+    }
+  });
+  cancelBtn.addEventListener('click', cleanup);
+}
+
+function loadSubmission(sub) {
+  state.submissionId = sub.id;
+  state.ideaPrompt = sub.idea;
+  state.ideaBudget = sub.budget || '';
+  state.ideaLocation = sub.location || '';
+  state.round1 = sub.analyzeResult || null;
+  state.round2 = sub.modelResult || null;
+  state.round3 = sub.taxResult || null;
+
+  $('ideaPrompt').value = sub.idea;
+  $('ideaName').value = sub.caseName || sub.idea.slice(0, 60);
+  $('ideaBudget').value = sub.budget || '';
+  $('ideaLocation').value = sub.location || '';
+  state.ideaName = $('ideaName').value;
+
+  $('analysisResult').innerHTML = '';
+  $('analysisDoneNote').style.display = 'none';
+  $('round1Result').innerHTML = '';
+  $('modelResult').innerHTML = '';
+  $('taxResult').innerHTML = '';
+  $('status1').classList.remove('done');
+  $('status2').classList.remove('done');
+  $('status3').classList.remove('done');
+
+  if (state.round1) {
+    renderRound1(state.round1);
+    unlockSteps();
+    $('analysisDoneNote').style.display = 'block';
+  } else {
+    lockSteps();
+  }
+  if (state.round2) renderRound2(state.round2);
+  if (state.round3) renderRound3(state.round3);
+
+  $('savedModal').style.display = 'none';
+  goToStep(state.round1 ? 1 : 0);
+}
+
+// ==================== SIMULATOR (pure client-side, no AI) ====================
+const SIM_COLORS = ['#5b8def', '#3ecf8e', '#e0a13f', '#e0577e', '#a389f4', '#3fb8cf', '#e0d43f', '#f47f3f'];
+let simStreamIdSeq = 1;
+let simSelectedId = null;
+const simState = {
+  streams: [
+    { id: simStreamIdSeq++, name: 'Product sales', monthly: 1500, growthPct: 3, mode: 'reinvest' },
+    { id: simStreamIdSeq++, name: 'Subscriptions', monthly: 600, growthPct: 5, mode: 'personal' },
+  ],
+};
+let simLastResult = null; // exposed for the tax round's "Use simulator numbers" import
+
+function simColor(i) { return SIM_COLORS[i % SIM_COLORS.length]; }
+
+function simAddStream(preset) {
+  simState.streams.push(Object.assign({
+    id: simStreamIdSeq++, name: `Revenue stream ${simState.streams.length + 1}`,
+    monthly: 500, growthPct: 0, mode: 'reinvest',
+  }, preset || {}));
+  renderSimStreams();
+  runSimulation();
+}
+
+function renderSimStreams() {
+  const wrap = $('simStreams');
+  if (!wrap) return;
+  wrap.innerHTML = simState.streams.map(s => `
+    <div class="sim-stream-row ${s.id === simSelectedId ? 'sim-stream-row-active' : ''}" data-id="${s.id}">
+      <span class="sim-stream-dot" style="background:${simColor(simState.streams.indexOf(s))}"></span>
+      <input type="text" class="sim-stream-name" data-field="name" value="${escapeHTML(s.name)}" placeholder="Stream name" />
+      <div class="sim-stream-num">
+        <label>$/mo</label>
+        <input type="number" data-field="monthly" value="${s.monthly}" min="0" step="50" />
+      </div>
+      <div class="sim-stream-num">
+        <label>Growth %/mo</label>
+        <input type="number" data-field="growthPct" value="${s.growthPct}" step="0.5" />
+      </div>
+      <div class="sim-stream-toggle">
+        <button type="button" class="sim-toggle-btn ${s.mode === 'reinvest' ? 'active' : ''}" data-mode="reinvest">Reinvest in business</button>
+        <button type="button" class="sim-toggle-btn ${s.mode === 'personal' ? 'active' : ''}" data-mode="personal">Owner's personal income</button>
+      </div>
+      <button type="button" class="sim-remove-btn" aria-label="Remove stream">&times;</button>
+    </div>
+  `).join('');
+
+  wrap.querySelectorAll('.sim-stream-row').forEach(row => {
+    const id = Number(row.dataset.id);
+    const stream = simState.streams.find(s => s.id === id);
+    row.addEventListener('click', (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+      simSelectedId = id;
+      renderSimStreams();
+      drawSimFlowDiagram();
+    });
+    row.querySelectorAll('input[data-field]').forEach(inp => {
+      inp.addEventListener('input', () => {
+        const field = inp.dataset.field;
+        stream[field] = field === 'name' ? inp.value : Number(inp.value) || 0;
+        runSimulation();
+      });
+    });
+    row.querySelectorAll('.sim-toggle-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        stream.mode = btn.dataset.mode;
+        row.querySelectorAll('.sim-toggle-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        runSimulation();
+      });
+    });
+    row.querySelector('.sim-remove-btn').addEventListener('click', () => {
+      simState.streams = simState.streams.filter(s => s.id !== id);
+      if (simSelectedId === id) simSelectedId = null;
+      renderSimStreams();
+      runSimulation();
+    });
+  });
+}
+
+function computeSimulation() {
+  const initial = Number($('simInitialInvestment').value) || 0;
+  const months = Math.max(1, Math.min(120, Number($('simMonths').value) || 24));
+
+  let capital = initial;
+  let personalIncome = 0;
+  const capitalSeries = [capital];
+  const incomeSeries = [personalIncome];
+  const perStreamSeries = simState.streams.map(() => [0]);
+  const perStreamTotals = simState.streams.map(() => 0);
+
+  const monthlyAmounts = simState.streams.map(s => s.monthly);
+
+  for (let m = 1; m <= months; m++) {
+    simState.streams.forEach((s, i) => {
+      const grown = monthlyAmounts[i] * Math.pow(1 + (s.growthPct || 0) / 100, m - 1);
+      perStreamTotals[i] += grown;
+      perStreamSeries[i].push(perStreamTotals[i]);
+      if (s.mode === 'reinvest') {
+        capital += grown;
+      } else {
+        personalIncome += grown;
+      }
+    });
+    capitalSeries.push(capital);
+    incomeSeries.push(personalIncome);
+  }
+
+  return {
+    months, capitalSeries, incomeSeries, perStreamSeries, perStreamTotals,
+    initial, finalCapital: capital, finalIncome: personalIncome,
+    streams: simState.streams.map((s, i) => ({ ...s, total: perStreamTotals[i] })),
+  };
+}
+
+function svgLinePath(series, x, y) {
+  return series.map((v, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
+}
+
+function drawSimChart(data) {
+  const svg = $('simChart');
+  if (!svg) return;
+  const W = 800, H = 300, padL = 60, padR = 15, padT = 15, padB = 30;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+
+  const allVals = [...data.capitalSeries, ...data.incomeSeries, 0];
+  const maxVal = Math.max(1, ...allVals);
+  const n = data.capitalSeries.length;
+
+  const x = (i) => padL + (i / (n - 1)) * plotW;
+  const y = (v) => padT + plotH - (v / maxVal) * plotH;
+
+  const gridLines = [];
+  for (let g = 0; g <= 4; g++) {
+    const gy = padT + (g / 4) * plotH;
+    const val = Math.round(maxVal - (g / 4) * maxVal);
+    gridLines.push(`<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`);
+    gridLines.push(`<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="10" fill="#8a94a6">$${val.toLocaleString()}</text>`);
+  }
+
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  svg.innerHTML = `
+    ${gridLines.join('')}
+    <path d="${svgLinePath(data.capitalSeries, x, y)}" fill="none" stroke="#5b8def" stroke-width="2.5" />
+    <path d="${svgLinePath(data.incomeSeries, x, y)}" fill="none" stroke="#3ecf8e" stroke-width="2.5" />
+  `;
+}
+
+function drawSimStreamChart(data) {
+  const svg = $('simStreamChart');
+  if (!svg) return;
+  const W = 800, H = 260, padL = 60, padR = 15, padT = 15, padB = 30;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+
+  const allVals = [0, ...data.perStreamSeries.flat()];
+  const maxVal = Math.max(1, ...allVals);
+  const n = data.months + 1;
+
+  const x = (i) => padL + (i / (n - 1)) * plotW;
+  const y = (v) => padT + plotH - (v / maxVal) * plotH;
+
+  const gridLines = [];
+  for (let g = 0; g <= 4; g++) {
+    const gy = padT + (g / 4) * plotH;
+    const val = Math.round(maxVal - (g / 4) * maxVal);
+    gridLines.push(`<line x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`);
+    gridLines.push(`<text x="${padL - 8}" y="${gy + 4}" text-anchor="end" font-size="10" fill="#8a94a6">$${val.toLocaleString()}</text>`);
+  }
+
+  const lines = data.perStreamSeries.map((series, i) =>
+    `<path d="${svgLinePath(series, x, y)}" fill="none" stroke="${simColor(i)}" stroke-width="2.5" ${simState.streams[i] && simState.streams[i].id === simSelectedId ? '' : 'opacity="0.9"'} />`
+  ).join('');
+
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  svg.innerHTML = `${gridLines.join('')}${lines}`;
+
+  const legend = $('simStreamLegend');
+  if (legend) {
+    legend.innerHTML = data.streams.map((s, i) => `
+      <span class="sim-legend-item"><i class="sim-swatch" style="background:${simColor(i)}"></i> ${escapeHTML(s.name)} — $${Math.round(s.total).toLocaleString()} total</span>
+    `).join('');
+  }
+}
+
+function drawSimFlowDiagram() {
+  const svg = $('simFlowDiagram');
+  if (!svg) return;
+  const W = 800, H = 320;
+  const cx = W / 2, cy = H / 2;
+  const streams = simState.streams;
+  const n = Math.max(1, streams.length);
+  const radius = 220;
+
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+  const nodes = streams.map((s, i) => {
+    const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
+    const nx = cx + Math.cos(angle) * radius;
+    const ny = cy + Math.sin(angle) * radius * 0.68;
+    return { s, i, x: Math.max(90, Math.min(W - 90, nx)), y: Math.max(50, Math.min(H - 40, ny)) };
+  });
+
+  const arrows = nodes.map(node => {
+    const color = node.s.mode === 'reinvest' ? '#3ecf8e' : '#e0577e';
+    // reinvest: stream -> capital (arrow points inward). personal: capital -> stream (arrow points outward).
+    const [x1, y1, x2, y2] = node.s.mode === 'reinvest' ? [node.x, node.y, cx, cy] : [cx, cy, node.x, node.y];
+    const midX = (x1 + x2) / 2, midY = (y1 + y2) / 2;
+    return `
+      <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2.5" marker-end="url(#simArrow-${node.i})" opacity="${node.s.id === simSelectedId ? '1' : '0.55'}" />
+      <text x="${midX}" y="${midY - 8}" text-anchor="middle" font-size="10" fill="${color}">${node.s.mode === 'reinvest' ? 'reinvests' : 'pays out'}</text>
+    `;
+  }).join('');
+
+  const defs = nodes.map(node => {
+    const color = node.s.mode === 'reinvest' ? '#3ecf8e' : '#e0577e';
+    return `<marker id="simArrow-${node.i}" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="${color}"/></marker>`;
+  }).join('');
+
+  const streamNodes = nodes.map(node => `
+    <g class="sim-node" data-id="${node.s.id}" style="cursor:pointer;">
+      <circle cx="${node.x}" cy="${node.y}" r="42" fill="${simColor(node.i)}" opacity="${node.s.id === simSelectedId ? '1' : '0.85'}" stroke="#0b0c10" stroke-width="${node.s.id === simSelectedId ? '3' : '0'}" />
+      <text x="${node.x}" y="${node.y - 4}" text-anchor="middle" font-size="11" font-weight="700" fill="#061109">${escapeHTML((node.s.name || '').slice(0, 14))}</text>
+      <text x="${node.x}" y="${node.y + 12}" text-anchor="middle" font-size="10" fill="#061109">$${Number(node.s.monthly).toLocaleString()}/mo</text>
+    </g>
+  `).join('');
+
+  svg.innerHTML = `
+    <defs>${defs}</defs>
+    ${arrows}
+    <circle cx="${cx}" cy="${cy}" r="56" fill="#5b8def" stroke="#0b0c10" stroke-width="3" />
+    <text x="${cx}" y="${cy - 6}" text-anchor="middle" font-size="12" font-weight="700" fill="#050912">Business</text>
+    <text x="${cx}" y="${cy + 12}" text-anchor="middle" font-size="12" font-weight="700" fill="#050912">Capital</text>
+    ${streamNodes}
+  `;
+
+  svg.querySelectorAll('.sim-node').forEach(node => {
+    node.addEventListener('click', () => {
+      simSelectedId = Number(node.dataset.id);
+      renderSimStreams();
+      drawSimFlowDiagram();
+      drawSimStreamChart(simLastResult || computeSimulation());
+    });
+  });
+}
+
+function runSimulation() {
+  if (!$('simChart')) return;
+  try {
+    const data = computeSimulation();
+    simLastResult = data;
+    drawSimChart(data);
+    drawSimStreamChart(data);
+    drawSimFlowDiagram();
+    $('simSummary').innerHTML = `
+      <div class="sim-summary-card">
+        <div class="sim-summary-label">Business capital after ${data.months} months</div>
+        <div class="sim-summary-value">$${Math.round(data.finalCapital).toLocaleString()}</div>
+      </div>
+      <div class="sim-summary-card">
+        <div class="sim-summary-label">Owner's cumulative personal income</div>
+        <div class="sim-summary-value income">$${Math.round(data.finalIncome).toLocaleString()}</div>
+      </div>
+    `;
+    if ($('useSimInTaxBtn')) $('useSimInTaxBtn').style.display = 'inline-block';
+  } catch (err) {
+    console.error('Simulator error:', err);
+    $('simSummary').innerHTML = `<div class="empty-note">Something went wrong running the simulation (${err.message}). Try adjusting a value.</div>`;
+  }
+}
+
+function simImportFromRound2() {
+  if (!state.round2) {
+    alert('Run Round 2 (the business model) first, then import from it here.');
+    return;
+  }
+  const m = state.round2;
+  if (m.totalStartupInvestment) $('simInitialInvestment').value = Math.round(Number(m.totalStartupInvestment) || 0);
+  if (m.revenueBreakdown && m.revenueBreakdown.length) {
+    simState.streams = m.revenueBreakdown.map(x => ({
+      id: simStreamIdSeq++, name: x.label || 'Revenue stream', monthly: Math.round((Number(x.amount) || 0) / 12) || 100,
+      growthPct: 2, mode: 'reinvest',
+    }));
+    simSelectedId = null;
+  }
+  renderSimStreams();
+  runSimulation();
+}
+
+if ($('simStartBtn')) {
+  $('simStartBtn').addEventListener('click', runSimulation);
+  $('simAddStreamBtn').addEventListener('click', () => simAddStream());
+  $('simInitialInvestment').addEventListener('input', runSimulation);
+  $('simMonths').addEventListener('input', runSimulation);
+  if ($('simImportBtn')) $('simImportBtn').addEventListener('click', simImportFromRound2);
+  renderSimStreams();
+  runSimulation();
+}
+
+goToStep(0);
+lockSteps();
+checkSession();

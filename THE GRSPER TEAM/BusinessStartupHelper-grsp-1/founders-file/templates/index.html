@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#05060a">
+<title>The Founder's File</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="bg-field" aria-hidden="true">
+  <div class="glow"></div>
+</div>
+
+<!-- ==================== LANDING PAGE ==================== -->
+<div id="landingPage" class="landing-page">
+  <button class="ghost landing-login-btn" id="landingLoginBtn" type="button">Log in</button>
+  <div class="landing-inner">
+    <h1 class="landing-title">The Founder's File</h1>
+    <p class="landing-tagline">Turn a raw business idea into a real case file — a sentiment read, a business model, a tax organizer, and a hands-on simulator, grounded in real cited sources instead of generic advice.</p>
+
+    <div class="landing-cta-row">
+      <button class="primary landing-cta" id="landingGetStarted1"><span>Get started</span></button>
+    </div>
+
+    <div class="landing-example">
+      <div class="landing-example-label">What you'll see — an example rating</div>
+      <div class="landing-example-card">
+        <div class="landing-score">78<span>/100</span></div>
+        <div class="landing-example-text">
+          <div class="landing-example-verdict">Worth a pilot</div>
+          <p>A subscription hot sauce box aimed at home cooks who already buy specialty ingredients online has a real, if crowded, market — differentiation and retention are the open questions.</p>
+        </div>
+      </div>
+      <div class="landing-example-bars">
+        <div class="landing-example-bar-row"><span>Money in</span><div class="landing-example-bar-track"><div class="landing-example-bar in" style="width:70%"></div></div></div>
+        <div class="landing-example-bar-row"><span>Money out</span><div class="landing-example-bar-track"><div class="landing-example-bar out" style="width:45%"></div></div></div>
+      </div>
+    </div>
+
+    <div class="landing-example">
+      <div class="landing-example-label">The Simulator — capital vs. personal income, projected out</div>
+      <svg viewBox="0 0 800 220" preserveAspectRatio="xMidYMid meet" class="landing-sim-chart">
+        <line x1="60" y1="20" x2="60" y2="190" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+        <line x1="60" y1="190" x2="770" y2="190" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+        <path d="M 60 160 L 200 140 L 340 110 L 480 80 L 620 50 L 770 25" fill="none" stroke="#5b8def" stroke-width="3"/>
+        <path d="M 60 185 L 200 178 L 340 165 L 480 148 L 620 128 L 770 105" fill="none" stroke="#3ecf8e" stroke-width="3"/>
+      </svg>
+      <div class="landing-sim-legend">
+        <span class="landing-sim-legend-item"><i class="sim-swatch" style="background:#5b8def"></i> Business capital</span>
+        <span class="landing-sim-legend-item"><i class="sim-swatch" style="background:#3ecf8e"></i> Owner personal income</span>
+      </div>
+    </div>
+
+    <div class="landing-features">
+      <div class="landing-feature"><h3>Should I do this?</h3><p>A grounded, evidence-based read on your idea's odds — not a generic pep talk.</p></div>
+      <div class="landing-feature"><h3>The business model</h3><p>Customer, revenue model, and a clear picture of what money comes in vs. goes out.</p></div>
+      <div class="landing-feature"><h3>Tax &amp; finance</h3><p>A projected Schedule C, tax strategies, and a recommendation on how to register your business.</p></div>
+      <div class="landing-feature"><h3>Simulator</h3><p>Pure math, no AI — play with capital, revenue streams, and payout choices yourself.</p></div>
+    </div>
+
+    <div class="landing-cta-row">
+      <button class="primary landing-cta" id="landingGetStarted2"><span>Get started</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== SIGN-IN PAGE ==================== -->
+<div id="authPage" class="auth-page" style="display:none;">
+  <div class="auth-page-inner">
+    <h2 id="authPageTitle">Create your account</h2>
+    <p class="auth-page-sub">Every case file is tied to your account, so your work is there when you come back.</p>
+
+    <a class="social-btn google" id="googleLoginBtn" href="/auth/google/login" style="display:none;">
+      <span class="social-icon">G</span> Continue with Google
+    </a>
+    <div class="or-divider"><span>or</span></div>
+
+    <div class="field">
+      <label for="authEmail">Email</label>
+      <input type="text" id="authEmail" placeholder="you@example.com" autocomplete="email" />
+    </div>
+    <div class="field">
+      <label for="authPassword">Password</label>
+      <input type="password" id="authPassword" placeholder="At least 8 characters" autocomplete="current-password" />
+    </div>
+    <div class="auth-error" id="authError" style="display:none;"></div>
+    <button class="primary" id="authSubmit" style="width:100%;"><span>Create account</span></button>
+
+    <p class="auth-page-switch">
+      <span id="authSwitchToLogin">Already have an account? <a href="#" id="switchToLoginLink">Log in</a></span>
+      <span id="authSwitchToSignup" style="display:none;">Need an account? <a href="#" id="switchToSignupLink">Create one</a></span>
+    </p>
+    <button class="ghost auth-back-btn" id="authBackToLanding" type="button">&larr; Back</button>
+  </div>
+</div>
+
+<!-- ==================== APP SHELL ==================== -->
+<div id="appShell" class="app-shell" style="display:none;">
+
+  <!-- LEFT SIDEBAR: step navigation, sticky -->
+  <nav class="side-nav" id="sideNav">
+    <div class="side-nav-title">The Founder's File</div>
+    <button class="side-nav-item active" data-round="0" id="navStep0">
+      <span class="side-nav-num"></span><span class="side-nav-label">The idea</span>
+    </button>
+    <div class="side-nav-divider"></div>
+    <button class="side-nav-item locked" data-round="1" id="navStep1" disabled>
+      <span class="side-nav-num" id="status1"></span><span class="side-nav-label">Should I do this?</span>
+    </button>
+    <button class="side-nav-item locked" data-round="2" id="navStep2" disabled>
+      <span class="side-nav-num" id="status2"></span><span class="side-nav-label">Business model &amp; Simulator</span>
+    </button>
+    <button class="side-nav-item locked" data-round="3" id="navStep3" disabled>
+      <span class="side-nav-num" id="status3"></span><span class="side-nav-label">Tax &amp; finance</span>
+    </button>
+    <div class="side-nav-divider"></div>
+    <button class="side-nav-item" data-round="5" id="navStep5">
+      <span class="side-nav-num"></span><span class="side-nav-label">Learn</span>
+    </button>
+  </nav>
+
+  <!-- MAIN CONTENT -->
+  <main class="main-col">
+
+    <!-- STEP 0: THE IDEA (required intake, gates everything else) -->
+    <div class="case-page round-page" id="round0">
+      <div class="round-label">The idea</div>
+      <h2>Tell us about the venture</h2>
+      <p class="dek">This is the one thing we need before anything else — your budget and location directly shape the rating and every round after it.</p>
+
+      <div class="field">
+        <label for="ideaName">Case / idea name</label>
+        <input type="text" id="ideaName" placeholder="Name this venture (e.g. 'Riverside Coffee Cart')" />
+      </div>
+      <div class="field">
+        <label for="ideaBudget">Starting budget</label>
+        <input type="text" id="ideaBudget" placeholder="e.g. $8,000 or 'under $2,000'" />
+      </div>
+      <div class="field">
+        <label for="ideaLocation">Business location</label>
+        <input type="text" id="ideaLocation" placeholder="e.g. Austin, TX" />
+      </div>
+      <div class="field">
+        <label for="ideaPrompt">Describe the idea</label>
+        <textarea id="ideaPrompt" placeholder="e.g. A subscription box that sends hot sauce from a different small producer every month, aimed at home cooks who already buy specialty ingredients online."></textarea>
+        <div class="hint">Be specific about the product, who buys it, and where — a sharper prompt gets a sharper read.</div>
+      </div>
+      <button class="primary" id="runAnalysis"><span>Rate this idea</span></button>
+
+      <div id="analysisLoading" style="display:none;"></div>
+      <div id="analysisResult"></div>
+      <div class="empty-note" id="analysisDoneNote" style="display:none;margin-top:16px;">Rated — see the result on the <strong>Should I do this?</strong> tab on the left.</div>
+    </div>
+
+    <!-- ROUND 1 (kept for internal state/id compatibility; content now mirrors round0's result) -->
+    <div class="case-page round-page" id="round1" style="display:none;">
+      <div class="round-label">Round 1 — Sentiment read</div>
+      <h2>Should I make this a business?</h2>
+      <p class="dek">The read on your idea, based on what you told us on the previous step.</p>
+      <div id="round1Result"></div>
+    </div>
+
+    <!-- ROUND 2 + SIMULATOR (merged: two sections stacked) -->
+    <div class="case-page round-page" id="round2" style="display:none;">
+      <div class="round-label">Round 2 — Business model &amp; Simulator</div>
+      <h2>How the money moves</h2>
+      <p class="dek">Pulled from your idea where possible. Fill in the gaps, and Claude will sketch a full one-page model — revenue lines, customer, and what it costs to start.</p>
+      <div class="field">
+        <label for="r2notes">Anything to add or correct before Claude drafts the model?</label>
+        <textarea id="r2notes" placeholder="Optional — e.g. 'I want to start online-only, no storefront.'"></textarea>
+      </div>
+      <button class="primary" id="runModel"><span>Draft the business model</span></button>
+      <div id="modelLoading" style="display:none;"></div>
+      <div id="modelResult"></div>
+
+      <div class="section-divider" style="margin:34px 0;border-top:1px solid var(--line);"></div>
+
+      <h3 style="font-size:16px;margin:18px 0 6px;">Simulate the numbers</h3>
+      <p class="dek">Every field below starts as Claude's estimate, grounded in your Round 1 sentiment read — edit any of them and it becomes yours. Requires Round 1 to have run first.</p>
+
+      <div id="vizGate" class="empty-note" style="display:none;">Run Round 1 (Should I do this?) first — the simulator is seeded from that read.</div>
+      <div id="vizContainer"></div>
+
+      <div class="section-divider" style="margin:34px 0;border-top:1px solid var(--line);"></div>
+
+      <div class="cushion-promo">
+        <div class="cushion-promo-text">
+          <h3>Cushion fund</h3>
+          <p class="dek">How much cash you personally have set aside before this business needs to make you money. Not sure? Walk through a guided calculator that turns your savings, a loan, and monthly expenses into a real runway number.</p>
+        </div>
+        <button type="button" id="cushionWizardOpenBtn" class="primary cushion-promo-btn">
+          <span>Calculate my runway</span>
+        </button>
+      </div>
+
+      <div class="field" style="margin-top:16px;">
+        <label for="cushionFundAmount">Cushion fund ($)</label>
+        <input type="number" id="cushionFundAmount" value="" min="0" step="100" placeholder="e.g. 5000" />
+        <div class="hint">Or type your number directly here if you already know it.</div>
+      </div>
+    </div>
+
+    <!-- ROUND 3 -->
+    <div class="case-page round-page" id="round3" style="display:none;">
+      <div class="round-label">Round 3 — Tax &amp; finance</div>
+      <h2>Schedule C &amp; keeping more of it</h2>
+      <p class="dek">Optional. Claude maps your model to the deduction categories a sole proprietor actually files under, flags what needs a real accountant, recommends how to register your business, and points to firms that work with small businesses.</p>
+      <div class="field">
+        <label for="r3expenses">Business expenses (optional)</label>
+        <div style="display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap;">
+          <button class="ghost" id="mockExtensionBtn" type="button" style="padding: 6px 12px; font-size: 13px;">Autofill sample expenses</button>
+          <button class="ghost" id="useSimInTaxBtn" type="button" style="padding: 6px 12px; font-size: 13px; display:none;">Use my Simulator numbers</button>
+        </div>
+        <textarea id="r3expenses" placeholder="Paste your raw expenses here (e.g. 'Laptop $1200, Web hosting $150, Facebook ads $300') or use the buttons above — or leave blank and run this on your idea alone."></textarea>
+      </div>
+      <div class="field">
+        <label for="r3taxYear">Tax year to plan for</label>
+        <select id="r3taxYear"></select>
+      </div>
+      <div class="field r3-hiring-field">
+        <label>Do you plan to hire anyone?</label>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <button class="sim-toggle-btn" id="r3HireNoBtn" type="button">No — solo for now</button>
+          <button class="sim-toggle-btn" id="r3HireYesBtn" type="button">Yes, planning to hire</button>
+        </div>
+        <div id="r3HiringDetails" style="display:none;margin-top:12px;flex-wrap:wrap;gap:10px;">
+          <div class="field" style="flex:1;min-width:160px;">
+            <label for="r3HireCount">Planned headcount</label>
+            <input type="number" id="r3HireCount" min="1" step="1" placeholder="e.g. 1">
+          </div>
+          <div class="field" style="flex:1;min-width:160px;">
+            <label for="r3HireSalary">Average salary/role ($)</label>
+            <input type="number" id="r3HireSalary" min="0" step="1000" placeholder="e.g. 45000">
+          </div>
+        </div>
+      </div>
+      <button class="primary" id="runTax"><span>Build projected Schedule C &amp; tax strategies</span></button>
+      <div id="taxLoading" style="display:none;"></div>
+      <div id="taxResult"></div>
+    </div>
+
+    <!-- LEARN TAB -->
+    <div class="case-page round-page" id="round5" style="display:none;">
+      <div class="round-label">Learn</div>
+      <h2>Everything you need to know, in plain language</h2>
+      <p class="dek">Written once with real sources baked in — IRS.gov, SBA.gov, and a few well-established explainer sites where a government source didn't cover it directly. Scroll through, or ask Claude anything not covered below.</p>
+
+      <div id="faqList"></div>
+
+      <div class="section-divider" style="margin:34px 0;border-top:1px solid var(--line);"></div>
+
+      <h3 style="font-size:16px;margin:0 0 6px;">Still have a question?</h3>
+      <p class="dek">Ask Claude directly. Every answer cites a real source and shows the exact text it used — never a bare claim.</p>
+      <div class="field">
+        <label for="askClaudeBox">Your question <span id="askClaudeCounter" style="color:var(--ink-dim);font-weight:400;">(0/400)</span></label>
+        <textarea id="askClaudeBox" maxlength="400" placeholder="e.g. 'What's the difference between a DBA and an LLC?'"></textarea>
+      </div>
+      <button class="primary" id="askClaudeBtn" type="button"><span>Ask Claude</span></button>
+      <div id="askClaudeLoading" style="display:none;"></div>
+      <div id="askClaudeResult"></div>
+    </div>
+
+    <div class="footer-row">
+      <button class="ghost" id="exportBtn" style="display:none;">Save this file (.md)</button>
+    </div>
+
+    <div class="small-note">This is a reasoning tool, not licensed financial, legal, or tax advice — verify anything specific (deduction eligibility, filing thresholds, local regulations) with a CPA before you act on it.</div>
+
+  </main>
+
+  <!-- RIGHT RAIL: account, sticky -->
+  <aside class="account-rail" id="accountRail">
+    <div id="accountSignedIn" class="account-rail-inner" style="display:none;">
+      <div class="account-profile">
+        <div class="account-avatar" id="accountAvatar">?</div>
+        <span class="account-email mono" id="accountEmail"></span>
+      </div>
+      <button class="ghost rail-btn" id="openSaved">My saved ideas</button>
+      <button class="ghost rail-btn" id="saveToAccountBtn">Save this idea</button>
+      <button class="ghost rail-btn" id="newIdeaBtn">+ New idea</button>
+      <button class="ghost rail-btn" id="logoutBtn">Log out</button>
+    </div>
+    <div id="accountSignedOut" class="account-rail-inner" style="display:none;">
+      <button class="ghost rail-btn" id="openLogin">Log in</button>
+      <button class="ghost rail-btn" id="openSignup">Create account</button>
+    </div>
+  </aside>
+
+</div><!-- /#appShell -->
+
+<div class="modal-overlay" id="savedModal" style="display:none;">
+  <div class="modal">
+    <button class="modal-close" id="closeSavedModal" type="button">&times;</button>
+    <h3 style="margin:0 0 14px;font-size:18px;">My saved ideas</h3>
+    <div id="savedList"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="deleteConfirmModal" style="display:none;z-index:200;">
+  <div class="modal">
+    <h3 style="margin:0 0 10px;font-size:17px;">Delete this idea?</h3>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 18px;">This can't be undone.</p>
+    <div style="display:flex;justify-content:flex-end;gap:8px;">
+      <button class="ghost" id="cancelDeleteBtn" type="button">Cancel</button>
+      <button class="primary" id="confirmDeleteBtn" type="button" style="background:var(--bad);border-color:var(--bad);"><span>Delete</span></button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="newIdeaModal" style="display:none;">
+  <div class="modal">
+    <h3 style="margin:0 0 10px;font-size:17px;">Start a new idea?</h3>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 18px;">You have unsaved work. Save it to your account first, or discard it and start fresh.</p>
+    <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
+      <button class="ghost" id="cancelNewIdeaBtn" type="button">Cancel</button>
+      <button class="ghost" id="discardNewIdeaBtn" type="button">Discard &amp; start new</button>
+      <button class="primary" id="saveThenNewIdeaBtn" type="button"><span>Save &amp; start new</span></button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="cushionWizardModal" style="display:none;">
+  <div class="modal" style="max-width:460px;">
+    <button class="modal-close" id="cushionWizardCloseBtn" type="button">&times;</button>
+    <div id="cushionWizardDots" style="display:flex;gap:6px;margin-bottom:16px;"></div>
+
+    <!-- Step 1 -->
+    <div class="wizard-step" id="cushionStep1">
+      <h3 style="margin:0 0 6px;font-size:17px;">How much do you have saved up?</h3>
+      <p style="color:var(--ink-soft);font-size:13.5px;margin:0 0 16px;">Cash you could actually use to cover yourself — savings, not retirement accounts.</p>
+      <div class="field">
+        <label for="wizSavings">Current savings ($)</label>
+        <input type="number" id="wizSavings" value="5000" min="0" step="100" />
+      </div>
+    </div>
+
+    <!-- Step 2 -->
+    <div class="wizard-step" id="cushionStep2" style="display:none;">
+      <h3 style="margin:0 0 6px;font-size:17px;">What do you spend per month, personally?</h3>
+      <p style="color:var(--ink-soft);font-size:13.5px;margin:0 0 16px;">Rent, groceries, bills — your actual cost of living, not the business's expenses.</p>
+      <div class="field">
+        <label for="wizExpenses">Monthly personal expenses ($)</label>
+        <input type="number" id="wizExpenses" value="2500" min="0" step="50" />
+      </div>
+    </div>
+
+    <!-- Step 3 -->
+    <div class="wizard-step" id="cushionStep3" style="display:none;">
+      <h3 style="margin:0 0 6px;font-size:17px;">Any loan or outside capital?</h3>
+      <p style="color:var(--ink-soft);font-size:13.5px;margin:0 0 16px;">Leave at 0 if you're only using your own savings.</p>
+      <div class="field">
+        <label for="wizLoan">Loan / outside capital ($)</label>
+        <input type="number" id="wizLoan" value="0" min="0" step="100" />
+      </div>
+    </div>
+
+    <!-- Step 4 -->
+    <div class="wizard-step" id="cushionStep4" style="display:none;">
+      <h3 style="margin:0 0 6px;font-size:17px;">How many hours a week can you commit?</h3>
+      <p style="color:var(--ink-soft);font-size:13.5px;margin:0 0 16px;">This affects how realistic your ramp-up speed is — doesn't change the runway number itself.</p>
+      <div class="field">
+        <label for="wizHours">Hours/week</label>
+        <input type="number" id="wizHours" value="20" min="0" max="168" step="1" />
+      </div>
+    </div>
+
+    <!-- Step 5: result -->
+    <div class="wizard-step" id="cushionStep5" style="display:none;">
+      <h3 style="margin:0 0 10px;font-size:17px;">Here's your runway</h3>
+      <div id="wizSummary" class="sim-summary" style="margin-bottom:14px;"></div>
+      <div class="sim-chart-wrap" style="margin-bottom:14px;">
+        <svg id="wizChart" viewBox="0 0 800 180" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+      <button class="primary" id="wizUseNumberBtn" type="button" style="width:100%;margin-bottom:10px;"><span>Use this number</span></button>
+      <button class="ghost" id="wizAssessBtn" type="button" style="width:100%;margin-bottom:10px;">Get Claude's read on this</button>
+      <div id="wizAssessLoading" style="display:none;"></div>
+      <div id="wizAssessResult"></div>
+    </div>
+
+    <div style="display:flex;justify-content:space-between;gap:8px;margin-top:20px;">
+      <button class="ghost" id="cushionWizBackBtn" type="button" style="visibility:hidden;">&larr; Back</button>
+      <button class="primary" id="cushionWizNextBtn" type="button"><span>Next</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- Self-hosted (not loaded from unpkg.com) so Visualization works regardless
+     of network access, ad blockers, or CSP script-src restrictions.
+     GraphViz.jsx is precompiled to GraphViz.compiled.js (plain
+     React.createElement calls, no JSX) at build time — see
+     static/build_graphviz.sh — instead of shipping Babel-standalone and
+     compiling it in the browser. In-browser Babel compilation only works by
+     injecting the compiled code as a new inline <script>, which a strict
+     CSP (script-src 'self', no 'unsafe-inline') always blocks regardless of
+     where the Babel/React scripts themselves are hosted from. Precompiling
+     avoids that entirely: GraphViz.compiled.js is a normal same-origin
+     <script src>, nothing is ever eval'd or inline-injected. -->
+<script src="{{ url_for('static', filename='vendor/react.production.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/react-dom.production.min.js') }}"></script>
+
+<script src="{{ url_for('static', filename='simulation.js') }}"></script>
+<script src="{{ url_for('static', filename='GraphViz.compiled.js') }}"></script>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script src="{{ url_for('static', filename='visualization.js') }}"></script>
+</body>
+</html>

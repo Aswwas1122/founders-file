@@ -1,0 +1,4 @@
+founders-file/founders_file.db
+founders-file/.env
+founders-file/venv/
+founders-file/__pycache__/
